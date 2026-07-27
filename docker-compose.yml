@@ -1,24 +1,227 @@
-version: "3.9"
+x-common-env: &common_env
+  ENVIRONMENT: ${ENVIRONMENT:?ENVIRONMENT is required}
+  API_PREFIX: ${API_PREFIX:?API_PREFIX is required}
+  JWT_SECRET_KEY: ${JWT_SECRET_KEY:?JWT_SECRET_KEY is required}
+  JWT_ALGORITHM: ${JWT_ALGORITHM:?JWT_ALGORITHM is required}
+  ACCESS_TOKEN_EXPIRE_MINUTES: ${ACCESS_TOKEN_EXPIRE_MINUTES:?ACCESS_TOKEN_EXPIRE_MINUTES is required}
+  REFRESH_TOKEN_EXPIRE_DAYS: ${REFRESH_TOKEN_EXPIRE_DAYS:?REFRESH_TOKEN_EXPIRE_DAYS is required}
+  REQUEST_TIMEOUT_SECONDS: ${REQUEST_TIMEOUT_SECONDS:?REQUEST_TIMEOUT_SECONDS is required}
+
+x-python-build: &python_build
+  context: .
+  args:
+    PYTHONDONTWRITEBYTECODE: ${PYTHONDONTWRITEBYTECODE:?PYTHONDONTWRITEBYTECODE is required}
+    PYTHONUNBUFFERED: ${PYTHONUNBUFFERED:?PYTHONUNBUFFERED is required}
+    UV_COMPILE_BYTECODE: ${UV_COMPILE_BYTECODE:?UV_COMPILE_BYTECODE is required}
+    UV_LINK_MODE: ${UV_LINK_MODE:?UV_LINK_MODE is required}
+    APP_HOST: ${APP_HOST:?APP_HOST is required}
+    APP_PORT: ${APP_PORT:?APP_PORT is required}
 
 services:
-  rabbitmq:
-    image: rabbitmq:3-management
+  gateway:
+    build:
+      <<: *python_build
+      dockerfile: services/api-gateway/Dockerfile
+    container_name: pos-ms-gateway
+    environment:
+      <<: *common_env
+      APP_NAME: ${GATEWAY_APP_NAME:?GATEWAY_APP_NAME is required}
+      SERVICE_ROLE: ${GATEWAY_SERVICE_ROLE:?GATEWAY_SERVICE_ROLE is required}
+      AUTH_SERVICE_URL: ${AUTH_SERVICE_URL:?AUTH_SERVICE_URL is required}
+      POS_SERVICE_URL: ${POS_SERVICE_URL:?POS_SERVICE_URL is required}
+      PRODUCT_SERVICE_URL: ${PRODUCT_SERVICE_URL:?PRODUCT_SERVICE_URL is required}
+      APP_HOST: ${APP_HOST:?APP_HOST is required}
+      APP_PORT: ${APP_PORT:?APP_PORT is required}
     ports:
-      - "5672:5672"
-      - "15672:15672"
+      - "${GATEWAY_PORT:?GATEWAY_PORT is required}:${APP_PORT:?APP_PORT is required}"
+    depends_on:
+      auth-service:
+        condition: service_started
+      pos-service:
+        condition: service_started
+      product-service:
+        condition: service_started
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
 
-  api:
-    build: ./services/api
-    env_file:
-      - .env
+  auth-service:
+    build:
+      <<: *python_build
+      dockerfile: services/auth-service/Dockerfile
+    container_name: pos-ms-auth
+    environment:
+      <<: *common_env
+      APP_NAME: ${AUTH_APP_NAME:?AUTH_APP_NAME is required}
+      SERVICE_ROLE: ${AUTH_SERVICE_ROLE:?AUTH_SERVICE_ROLE is required}
+      DATABASE_URL: ${DATABASE_URL:?DATABASE_URL is required}
+      ODOO_BASE_URL: ${ODOO_BASE_URL:?ODOO_BASE_URL is required}
+      INTERNAL_SERVICE_KEY: ${INTERNAL_SERVICE_KEY:?INTERNAL_SERVICE_KEY is required}
+      APP_HOST: ${APP_HOST:?APP_HOST is required}
+      APP_PORT: ${APP_PORT:?APP_PORT is required}
+    depends_on:
+      auth-db:
+        condition: service_healthy
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+
+  pos-service:
+    build:
+      <<: *python_build
+      dockerfile: services/pos-config-session-service/Dockerfile
+    container_name: pos-ms-pos
+    environment:
+      <<: *common_env
+      APP_NAME: ${POS_APP_NAME:?POS_APP_NAME is required}
+      SERVICE_ROLE: ${POS_SERVICE_ROLE:?POS_SERVICE_ROLE is required}
+      DATABASE_URL: ${POS_DATABASE_URL:?POS_DATABASE_URL is required}
+      ODOO_BASE_URL: ${ODOO_BASE_URL:?ODOO_BASE_URL is required}
+      AUTH_SERVICE_URL: ${AUTH_SERVICE_URL:?AUTH_SERVICE_URL is required}
+      INTERNAL_SERVICE_KEY: ${INTERNAL_SERVICE_KEY:?INTERNAL_SERVICE_KEY is required}
+      APP_HOST: ${APP_HOST:?APP_HOST is required}
+      APP_PORT: ${APP_PORT:?APP_PORT is required}
+    depends_on:
+      pos-db:
+        condition: service_healthy
+      auth-service:
+        condition: service_started
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+
+  product-service:
+    build:
+      context: ./services/product-catalog-service
+      network: host
+    container_name: pos-ms-product
+    environment:
+      NODE_ENV: ${ENVIRONMENT:?ENVIRONMENT is required}
+      API_PREFIX: ${API_PREFIX:?API_PREFIX is required}
+      PRODUCT_SERVICE_HOST: ${PRODUCT_SERVICE_HOST:?PRODUCT_SERVICE_HOST is required}
+      PRODUCT_SERVICE_PORT: ${PRODUCT_SERVICE_PORT:?PRODUCT_SERVICE_PORT is required}
+      REQUEST_TIMEOUT_SECONDS: ${REQUEST_TIMEOUT_SECONDS:?REQUEST_TIMEOUT_SECONDS is required}
+      AUTH_SERVICE_URL: ${AUTH_SERVICE_URL:?AUTH_SERVICE_URL is required}
+      ODOO_BASE_URL: ${ODOO_BASE_URL:?ODOO_BASE_URL is required}
+      INTERNAL_SERVICE_KEY: ${INTERNAL_SERVICE_KEY:?INTERNAL_SERVICE_KEY is required}
+      CATALOG_MONGO_URL: ${CATALOG_MONGO_URL:?CATALOG_MONGO_URL is required}
+      CATALOG_MONGO_DB: ${CATALOG_MONGO_DB:?CATALOG_MONGO_DB is required}
+      REDIS_URL: ${REDIS_URL:?REDIS_URL is required}
+      CATALOG_CACHE_TTL_SECONDS: ${CATALOG_CACHE_TTL_SECONDS:?CATALOG_CACHE_TTL_SECONDS is required}
+      CATALOG_MAX_LIMIT: ${CATALOG_MAX_LIMIT:?CATALOG_MAX_LIMIT is required}
     ports:
-      - "8000:8000"
+      - "${PRODUCT_SERVICE_HOST_PORT:?PRODUCT_SERVICE_HOST_PORT is required}:${PRODUCT_SERVICE_PORT:?PRODUCT_SERVICE_PORT is required}"
     depends_on:
-      - rabbitmq
+      catalog-mongo:
+        condition: service_healthy
+      redis:
+        condition: service_started
+      auth-service:
+        condition: service_started
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
 
-  worker:
-    build: ./services/worker
-    env_file:
-      - .env
+  auth-db:
+    image: postgres:16-alpine
+    container_name: pos-ms-auth-db
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:?POSTGRES_DB is required}
+      POSTGRES_USER: ${POSTGRES_USER:?POSTGRES_USER is required}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}
+    ports:
+      - "${POSTGRES_HOST_PORT:?POSTGRES_HOST_PORT is required}:${POSTGRES_PORT:?POSTGRES_PORT is required}"
+    volumes:
+      - pos_auth_db_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:?POSTGRES_USER is required} -d ${POSTGRES_DB:?POSTGRES_DB is required}"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  pos-db:
+    image: postgres:16-alpine
+    container_name: pos-ms-pos-db
+    environment:
+      POSTGRES_DB: ${POS_POSTGRES_DB:?POS_POSTGRES_DB is required}
+      POSTGRES_USER: ${POS_POSTGRES_USER:?POS_POSTGRES_USER is required}
+      POSTGRES_PASSWORD: ${POS_POSTGRES_PASSWORD:?POS_POSTGRES_PASSWORD is required}
+    ports:
+      - "${POS_POSTGRES_HOST_PORT:?POS_POSTGRES_HOST_PORT is required}:${POS_POSTGRES_PORT:?POS_POSTGRES_PORT is required}"
+    volumes:
+      - pos_core_db_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POS_POSTGRES_USER:?POS_POSTGRES_USER is required} -d ${POS_POSTGRES_DB:?POS_POSTGRES_DB is required}"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  redis:
+    image: redis:7-alpine
+    container_name: pos-ms-redis
+    command: ["redis-server", "--appendonly", "${REDIS_APPENDONLY:?REDIS_APPENDONLY is required}"]
+    ports:
+      - "${REDIS_HOST_PORT:?REDIS_HOST_PORT is required}:${REDIS_PORT:?REDIS_PORT is required}"
+
+  catalog-mongo:
+    image: mongo:7
+    container_name: pos-ms-catalog-mongo
+    environment:
+      MONGO_INITDB_ROOT_USERNAME: ${CATALOG_MONGO_ROOT_USER:?CATALOG_MONGO_ROOT_USER is required}
+      MONGO_INITDB_ROOT_PASSWORD: ${CATALOG_MONGO_ROOT_PASSWORD:?CATALOG_MONGO_ROOT_PASSWORD is required}
+    ports:
+      - "${CATALOG_MONGO_HOST_PORT:?CATALOG_MONGO_HOST_PORT is required}:${CATALOG_MONGO_PORT:?CATALOG_MONGO_PORT is required}"
+    volumes:
+      - pos_catalog_mongo_data:/data/db
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "mongosh",
+          "--quiet",
+          "--username",
+          "${CATALOG_MONGO_ROOT_USER:?CATALOG_MONGO_ROOT_USER is required}",
+          "--password",
+          "${CATALOG_MONGO_ROOT_PASSWORD:?CATALOG_MONGO_ROOT_PASSWORD is required}",
+          "--authenticationDatabase",
+          "admin",
+          "--eval",
+          "db.adminCommand('ping').ok"
+        ]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  mongo-express:
+    image: mongo-express:1.0.2
+    container_name: pos-ms-mongo-express
+    environment:
+      ME_CONFIG_MONGODB_SERVER: catalog-mongo
+      ME_CONFIG_MONGODB_PORT: ${CATALOG_MONGO_PORT:?CATALOG_MONGO_PORT is required}
+      ME_CONFIG_MONGODB_ADMINUSERNAME: ${CATALOG_MONGO_ROOT_USER:?CATALOG_MONGO_ROOT_USER is required}
+      ME_CONFIG_MONGODB_ADMINPASSWORD: ${CATALOG_MONGO_ROOT_PASSWORD:?CATALOG_MONGO_ROOT_PASSWORD is required}
+      ME_CONFIG_BASICAUTH: "false"
+    ports:
+      - "${MONGO_EXPRESS_PORT:?MONGO_EXPRESS_PORT is required}:${MONGO_EXPRESS_INTERNAL_PORT:?MONGO_EXPRESS_INTERNAL_PORT is required}"
     depends_on:
-      - rabbitmq
+      catalog-mongo:
+        condition: service_healthy
+
+  pgadmin:
+    image: dpage/pgadmin4:8
+    container_name: pos-ms-pgadmin
+    environment:
+      PGADMIN_DEFAULT_EMAIL: ${PGADMIN_DEFAULT_EMAIL:?PGADMIN_DEFAULT_EMAIL is required}
+      PGADMIN_DEFAULT_PASSWORD: ${PGADMIN_DEFAULT_PASSWORD:?PGADMIN_DEFAULT_PASSWORD is required}
+      PGADMIN_CONFIG_SERVER_MODE: ${PGADMIN_CONFIG_SERVER_MODE:?PGADMIN_CONFIG_SERVER_MODE is required}
+    ports:
+      - "${PGADMIN_PORT:?PGADMIN_PORT is required}:${PGADMIN_INTERNAL_PORT:?PGADMIN_INTERNAL_PORT is required}"
+    volumes:
+      - pgadmin_data:/var/lib/pgadmin
+    depends_on:
+      auth-db:
+        condition: service_healthy
+      pos-db:
+        condition: service_healthy
+
+volumes:
+  pos_auth_db_data:
+  pos_core_db_data:
+  pos_catalog_mongo_data:
+  pgadmin_data:

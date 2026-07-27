@@ -1,0 +1,6 @@
+.git
+**/__pycache__
+**/.pytest_cache
+**/*.pyc
+services/product-catalog-service/node_modules
+services/product-catalog-service/dist
