@@ -23,6 +23,7 @@ class Settings(BaseSettings):
     auth_service_url: AnyHttpUrl | None = None
     pos_service_url: AnyHttpUrl | None = None
     product_service_url: AnyHttpUrl | None = None
+    member_service_url: AnyHttpUrl | None = None
     internal_service_key: str | None = None
     request_timeout_seconds: float = Field(...)
 
@@ -56,6 +57,7 @@ class Settings(BaseSettings):
                     "AUTH_SERVICE_URL": self.auth_service_url,
                     "POS_SERVICE_URL": self.pos_service_url,
                     "PRODUCT_SERVICE_URL": self.product_service_url,
+                    "MEMBER_SERVICE_URL": self.member_service_url,
                 }.items()
                 if value is None
             ]

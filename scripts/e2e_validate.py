@@ -238,6 +238,7 @@ def main() -> None:
         "AUTH_SERVICE_URL": f"http://127.0.0.1:{auth_port}",
         "POS_SERVICE_URL": f"http://127.0.0.1:{pos_port}",
         "PRODUCT_SERVICE_URL": "http://127.0.0.1:9",
+        "MEMBER_SERVICE_URL": "http://127.0.0.1:9",
         "INTERNAL_SERVICE_KEY": "e2e-internal-service-key",
         "ACCESS_TOKEN_EXPIRE_MINUTES": "15",
         "REFRESH_TOKEN_EXPIRE_DAYS": "14",

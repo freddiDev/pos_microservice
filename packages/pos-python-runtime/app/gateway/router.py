@@ -18,6 +18,10 @@ PRODUCT_PREFIXES = (
     "catalog",
 )
 
+MEMBER_PREFIXES = (
+    "members",
+)
+
 HOP_BY_HOP_HEADERS = {
     "connection",
     "keep-alive",
@@ -49,6 +53,8 @@ def include_gateway_routes(app: FastAPI) -> None:
             upstream = str(settings.pos_service_url).rstrip("/")
         elif route.startswith(PRODUCT_PREFIXES):
             upstream = str(settings.product_service_url).rstrip("/")
+        elif route.startswith(MEMBER_PREFIXES):
+            upstream = str(settings.member_service_url).rstrip("/")
         else:
             raise HTTPException(status_code=404, detail="No upstream configured for route.")
 

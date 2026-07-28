@@ -22,5 +22,6 @@ async def ready(request: Request) -> dict[str, str]:
             "auth_upstream": str(settings.auth_service_url),
             "pos_upstream": str(settings.pos_service_url),
             "product_upstream": str(settings.product_service_url),
+            "member_upstream": str(settings.member_service_url),
         }
     return {"status": "ready", "app": request.app.title}

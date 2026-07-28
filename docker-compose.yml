@@ -30,6 +30,7 @@ services:
       AUTH_SERVICE_URL: ${AUTH_SERVICE_URL:?AUTH_SERVICE_URL is required}
       POS_SERVICE_URL: ${POS_SERVICE_URL:?POS_SERVICE_URL is required}
       PRODUCT_SERVICE_URL: ${PRODUCT_SERVICE_URL:?PRODUCT_SERVICE_URL is required}
+      MEMBER_SERVICE_URL: ${MEMBER_SERVICE_URL:?MEMBER_SERVICE_URL is required}
       APP_HOST: ${APP_HOST:?APP_HOST is required}
       APP_PORT: ${APP_PORT:?APP_PORT is required}
     ports:
@@ -40,6 +41,8 @@ services:
       pos-service:
         condition: service_started
       product-service:
+        condition: service_started
+      member-service:
         condition: service_started
     extra_hosts:
       - "host.docker.internal:host-gateway"
@@ -108,6 +111,37 @@ services:
       CATALOG_MAX_LIMIT: ${CATALOG_MAX_LIMIT:?CATALOG_MAX_LIMIT is required}
     ports:
       - "${PRODUCT_SERVICE_HOST_PORT:?PRODUCT_SERVICE_HOST_PORT is required}:${PRODUCT_SERVICE_PORT:?PRODUCT_SERVICE_PORT is required}"
+    depends_on:
+      catalog-mongo:
+        condition: service_healthy
+      redis:
+        condition: service_started
+      auth-service:
+        condition: service_started
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+
+  member-service:
+    build:
+      context: ./services/customer-member-service
+      network: host
+    container_name: pos-ms-member
+    environment:
+      NODE_ENV: ${ENVIRONMENT:?ENVIRONMENT is required}
+      API_PREFIX: ${API_PREFIX:?API_PREFIX is required}
+      MEMBER_SERVICE_HOST: ${MEMBER_SERVICE_HOST:?MEMBER_SERVICE_HOST is required}
+      MEMBER_SERVICE_PORT: ${MEMBER_SERVICE_PORT:?MEMBER_SERVICE_PORT is required}
+      REQUEST_TIMEOUT_SECONDS: ${REQUEST_TIMEOUT_SECONDS:?REQUEST_TIMEOUT_SECONDS is required}
+      AUTH_SERVICE_URL: ${AUTH_SERVICE_URL:?AUTH_SERVICE_URL is required}
+      ODOO_BASE_URL: ${ODOO_BASE_URL:?ODOO_BASE_URL is required}
+      INTERNAL_SERVICE_KEY: ${INTERNAL_SERVICE_KEY:?INTERNAL_SERVICE_KEY is required}
+      MEMBER_MONGO_URL: ${MEMBER_MONGO_URL:?MEMBER_MONGO_URL is required}
+      MEMBER_MONGO_DB: ${MEMBER_MONGO_DB:?MEMBER_MONGO_DB is required}
+      REDIS_URL: ${REDIS_URL:?REDIS_URL is required}
+      MEMBER_CACHE_TTL_SECONDS: ${MEMBER_CACHE_TTL_SECONDS:?MEMBER_CACHE_TTL_SECONDS is required}
+      MEMBER_MAX_LIMIT: ${MEMBER_MAX_LIMIT:?MEMBER_MAX_LIMIT is required}
+    ports:
+      - "${MEMBER_SERVICE_HOST_PORT:?MEMBER_SERVICE_HOST_PORT is required}:${MEMBER_SERVICE_PORT:?MEMBER_SERVICE_PORT is required}"
     depends_on:
       catalog-mongo:
         condition: service_healthy

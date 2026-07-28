@@ -3,10 +3,11 @@ ENV_FILE ?= .env
 COMPOSE ?= docker compose --env-file $(ENV_FILE)
 PYTHON_RUNTIME_DIR ?= packages/pos-python-runtime
 PRODUCT_SERVICE_DIR ?= services/product-catalog-service
+MEMBER_SERVICE_DIR ?= services/customer-member-service
 
 include $(ENV_FILE)
 
-.PHONY: docker-build docker-up docker-down docker-restart ps logs test e2e docker-e2e pgadmin mongo-express shell-auth shell-pos shell-product shell-gateway db-shell pos-db-shell mongo-shell
+.PHONY: docker-build docker-up docker-down docker-restart ps logs test test-member e2e docker-e2e pgadmin mongo-express shell-auth shell-pos shell-product shell-member shell-gateway db-shell pos-db-shell mongo-shell
 
 docker-build:
 	$(COMPOSE) build
@@ -27,6 +28,9 @@ logs:
 
 test:
 	cd $(PYTHON_RUNTIME_DIR) && $(UV) run pytest -q
+
+test-member:
+	cd $(MEMBER_SERVICE_DIR) && npm test && npm run build
 
 e2e:
 	cd $(PYTHON_RUNTIME_DIR) && $(UV) run python ../../scripts/e2e_validate.py
@@ -54,6 +58,9 @@ shell-pos:
 
 shell-product:
 	$(COMPOSE) exec product-service sh
+
+shell-member:
+	$(COMPOSE) exec member-service sh
 
 shell-gateway:
 	$(COMPOSE) exec gateway bash
