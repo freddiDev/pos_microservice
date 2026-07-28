@@ -16,6 +16,7 @@ from app.pos.schemas import (
     ClosingControlOut,
     OpenSessionRequest,
     OpeningCashRequest,
+    PosCashierOut,
     PosConfigListOut,
     PosConfigOut,
     PosPaymentMethodOut,
@@ -37,7 +38,8 @@ class PosService:
         configs = []
         for item in items:
             config = await self._configs.upsert_config(db, item)
-            configs.append(_config_out(config, item.get("payment_methods") or []))
+            session_payload = await self._sync_config_session(db, principal, config, item)
+            configs.append(_config_out(config, item.get("payment_methods") or [], session=session_payload))
         await db.commit()
         return PosConfigListOut(items=configs)
 
@@ -48,8 +50,9 @@ class PosService:
         if not selected:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="POS config not found.")
         config = await self._configs.upsert_config(db, selected)
+        session_payload = await self._sync_config_session(db, principal, config, selected)
         await db.commit()
-        return _config_out(config, selected.get("payment_methods") or [])
+        return _config_out(config, selected.get("payment_methods") or [], session=session_payload)
 
     async def open_session(
         self,
@@ -246,8 +249,60 @@ class PosService:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="POS config not allowed or not found.")
         return await self._configs.upsert_config(db, selected)
 
+    async def _sync_config_session(
+        self,
+        db: AsyncSession,
+        principal: AuthPrincipal,
+        config: models.PosConfig,
+        item: dict[str, Any],
+    ) -> dict[str, Any] | None:
+        payload = _config_session_payload(item)
+        if payload is None:
+            return None
 
-def _config_out(config: models.PosConfig, payment_methods: list[dict[str, Any]] | None = None) -> PosConfigOut:
+        session_id = _int_or_none(payload.get("odoo_session_id") or payload.get("id"))
+        if session_id is not None and "odoo_session_id" not in payload:
+            payload["odoo_session_id"] = session_id
+        payload["odoo_config_id"] = _int_or_none(payload.get("odoo_config_id") or payload.get("config_id")) or config.odoo_config_id
+        payload["state"] = _none_false(payload.get("state")) or config.current_session_state or "opened"
+
+        if session_id is not None and not _has_complete_session_payload(payload):
+            try:
+                detail = _session_payload(
+                    await self._odoo_client.session_detail(
+                        principal.odoo_access_token,
+                        odoo_session_id=session_id,
+                    )
+                )
+                payload.update(detail)
+                payload["odoo_session_id"] = _int_or_none(payload.get("odoo_session_id") or payload.get("id")) or session_id
+                payload["odoo_config_id"] = _int_or_none(payload.get("odoo_config_id") or payload.get("config_id")) or config.odoo_config_id
+                payload["state"] = _none_false(payload.get("state")) or config.current_session_state or "opened"
+            except HTTPException:
+                payload.setdefault("opened_by", config.current_user_name)
+                payload.setdefault("odoo_user_id", config.current_user_odoo_id)
+
+        if _int_or_none(payload.get("odoo_session_id")) is not None:
+            await self._sessions.upsert_session(
+                db,
+                payload,
+                config=config,
+                user_id=None,
+                device_id=None,
+                device_code=None,
+                odoo_user_id=_int_or_none(payload.get("odoo_user_id")) or config.current_user_odoo_id,
+            )
+
+        return _mobile_session_dict(payload, config)
+
+
+def _config_out(
+    config: models.PosConfig,
+    payment_methods: list[dict[str, Any]] | None = None,
+    *,
+    session: dict[str, Any] | None = None,
+) -> PosConfigOut:
+    raw = config.raw_odoo_payload or {}
     return PosConfigOut(
         id=config.id,
         odoo_config_id=config.odoo_config_id,
@@ -255,7 +310,9 @@ def _config_out(config: models.PosConfig, payment_methods: list[dict[str, Any]] 
         name=config.name,
         active=config.active,
         company_odoo_id=config.company_odoo_id,
+        company_name=_none_false(raw.get("company_name")),
         warehouse_odoo_id=config.warehouse_odoo_id,
+        warehouse_name=_none_false(raw.get("warehouse_name") or raw.get("warehouse")),
         picking_type_odoo_id=config.picking_type_odoo_id,
         journal_odoo_id=config.journal_odoo_id,
         invoice_journal_odoo_id=config.invoice_journal_odoo_id,
@@ -270,7 +327,9 @@ def _config_out(config: models.PosConfig, payment_methods: list[dict[str, Any]] 
         current_session_state=config.current_session_state,
         current_user_odoo_id=config.current_user_odoo_id,
         current_user_name=config.current_user_name,
+        session=session,
         payment_methods=[_payment_out(item) for item in (payment_methods or [])],
+        cashiers=[_cashier_out(item) for item in (raw.get("cashiers") or [])],
         write_date=config.write_date,
         synced_at=config.synced_at,
     )
@@ -287,7 +346,20 @@ def _payment_out(item: dict[str, Any]) -> PosPaymentMethodOut:
     )
 
 
+def _cashier_out(item: dict[str, Any]) -> PosCashierOut:
+    user_id = int(item.get("odoo_user_id") or item.get("id"))
+    return PosCashierOut(
+        id=user_id,
+        odoo_user_id=user_id,
+        name=item.get("name") or f"Cashier {user_id}",
+        login=_none_false(item.get("login")),
+        avatar=_none_false(item.get("avatar")),
+        has_pos_pin=bool(item.get("has_pos_pin")),
+    )
+
+
 def _session_out(row: models.PosSession) -> PosSessionOut:
+    raw = row.raw_odoo_payload or {}
     return PosSessionOut(
         id=row.id,
         odoo_session_id=row.odoo_session_id,
@@ -296,6 +368,7 @@ def _session_out(row: models.PosSession) -> PosSessionOut:
         state=row.state,
         service_status=row.service_status,
         user_id=row.user_id,
+        opened_by=_none_false(raw.get("opened_by") or raw.get("user_name")),
         odoo_user_id=row.odoo_user_id,
         device_id=row.device_id,
         device_code=row.device_code,
@@ -311,6 +384,8 @@ def _session_out(row: models.PosSession) -> PosSessionOut:
         cash_register_balance_end=_float(row.cash_register_balance_end),
         cash_register_difference=_float(row.cash_register_difference),
         total_payments_amount=_float(row.total_payments_amount),
+        total_sales_cash=_float(raw.get("total_sales_cash")),
+        total_sales_bank=_float(raw.get("total_sales_bank")),
         order_count=row.order_count,
         login_number=row.login_number,
         sequence_number=row.sequence_number,
@@ -325,6 +400,64 @@ def _session_payload(data: dict[str, Any]) -> dict[str, Any]:
     if "session" in data and isinstance(data["session"], dict):
         return data["session"]
     return data
+
+
+def _config_session_payload(item: dict[str, Any]) -> dict[str, Any] | None:
+    raw = item.get("session")
+    if isinstance(raw, dict) and raw:
+        return dict(raw)
+
+    session_id = _int_or_none(item.get("current_session_odoo_id"))
+    state = _none_false(item.get("current_session_state"))
+    if session_id is None or state is None:
+        return None
+
+    return {
+        "odoo_session_id": session_id,
+        "odoo_config_id": _int_or_none(item.get("odoo_config_id")),
+        "state": state,
+        "odoo_user_id": _int_or_none(item.get("current_user_odoo_id")),
+        "opened_by": _none_false(item.get("current_user_name")),
+    }
+
+
+def _has_complete_session_payload(payload: dict[str, Any]) -> bool:
+    return any(
+        _none_false(payload.get(key)) is not None
+        for key in (
+            "start_at",
+            "stop_at",
+            "closed_at",
+            "cash_register_balance_start",
+            "total_sales_cash",
+            "total_payments_amount",
+        )
+    )
+
+
+def _mobile_session_dict(payload: dict[str, Any], config: models.PosConfig) -> dict[str, Any]:
+    session_id = _int_or_none(payload.get("odoo_session_id") or payload.get("id"))
+    config_id = _int_or_none(payload.get("odoo_config_id") or payload.get("config_id")) or config.odoo_config_id
+    stop_at = _none_false(payload.get("stop_at") or payload.get("closed_at"))
+    total_sales_cash = _float(payload.get("total_sales_cash"))
+    if total_sales_cash is None:
+        total_sales_cash = _float(payload.get("total_payments_amount"))
+
+    return {
+        "id": session_id,
+        "odoo_session_id": session_id,
+        "config_id": config_id,
+        "odoo_config_id": config_id,
+        "opened_by": _none_false(payload.get("opened_by") or payload.get("user_name")) or config.current_user_name or "-",
+        "move_id": payload.get("move_odoo_id") or payload.get("move_id"),
+        "start_at": _none_false(payload.get("start_at")),
+        "closed_at": stop_at,
+        "stop_at": stop_at,
+        "cash_register_balance_start": _float(payload.get("cash_register_balance_start")) or 0,
+        "total_sales_cash": total_sales_cash or 0,
+        "total_sales_bank": _float(payload.get("total_sales_bank")) or 0,
+        "state": _none_false(payload.get("state")) or config.current_session_state or "not_open",
+    }
 
 
 def _closing_out(odoo_session_id: int, data: dict[str, Any]) -> ClosingControlOut:
@@ -353,3 +486,23 @@ def _float(value: Any) -> float | None:
     if value is False:
         return None
     return float(value)
+
+
+def _int_or_none(value: Any) -> int | None:
+    if value is None or value is False:
+        return None
+    if isinstance(value, int):
+        return value
+    if isinstance(value, float):
+        return int(value)
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _none_false(value: Any) -> str | None:
+    if value is None or value is False:
+        return None
+    text = str(value).strip()
+    return text or None
