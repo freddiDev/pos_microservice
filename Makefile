@@ -6,6 +6,7 @@ PRODUCT_SERVICE_DIR ?= services/product-catalog-service
 MEMBER_SERVICE_DIR ?= services/customer-member-service
 
 include $(ENV_FILE)
+export $(shell sed -n 's/^\([A-Za-z_][A-Za-z0-9_]*\)=.*/\1/p' $(ENV_FILE))
 
 .PHONY: docker-build docker-up docker-down docker-restart ps logs test test-member e2e docker-e2e pgadmin mongo-express shell-auth shell-pos shell-product shell-member shell-gateway db-shell pos-db-shell mongo-shell
 
