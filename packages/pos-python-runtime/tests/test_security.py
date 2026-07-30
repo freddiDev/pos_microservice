@@ -1,5 +1,5 @@
 from app.core.config import Settings
-from app.core.security import create_access_token, decode_access_token, hash_token
+from app.core.security import create_access_token, decode_access_token, hash_password, hash_token, verify_password
 
 
 def test_access_token_roundtrip() -> None:
@@ -31,3 +31,10 @@ def test_hash_token_is_stable_and_not_plaintext() -> None:
     assert value == hash_token("secret-token")
     assert value != "secret-token"
     assert len(value) == 64
+
+
+def test_password_hash_verification() -> None:
+    encoded = hash_password("secret-password")
+    assert encoded != "secret-password"
+    assert verify_password("secret-password", encoded) is True
+    assert verify_password("wrong-password", encoded) is False

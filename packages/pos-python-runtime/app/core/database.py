@@ -38,6 +38,7 @@ async def init_database(engine: AsyncEngine, service_role: str) -> None:
         await conn.run_sync(Base.metadata.create_all)
         if engine.dialect.name == "postgresql":
             await conn.execute(text("ALTER TABLE devices DROP CONSTRAINT IF EXISTS uq_devices_device_code"))
+            await conn.execute(text("ALTER TABLE users ADD COLUMN IF NOT EXISTS local_password_hash TEXT"))
             await conn.execute(text("ALTER TABLE devices ADD COLUMN IF NOT EXISTS odoo_access_token TEXT"))
             await conn.execute(text("ALTER TABLE devices ADD COLUMN IF NOT EXISTS odoo_token_expires_at TIMESTAMP WITH TIME ZONE"))
 

@@ -27,6 +27,7 @@ class User(Base):
     warehouse_odoo_id: Mapped[int | None] = mapped_column(Integer, index=True)
     partner_odoo_id: Mapped[int | None] = mapped_column(Integer)
     active: Mapped[bool] = mapped_column(Boolean, default=True, index=True)
+    local_password_hash: Mapped[str | None] = mapped_column(Text)
     allowed_pos_configs: Mapped[dict] = mapped_column(JsonType, default=dict)
     raw_odoo_payload: Mapped[dict] = mapped_column(JsonType, default=dict)
     created_at: Mapped[str] = mapped_column(DateTime(timezone=True), server_default=func.now())

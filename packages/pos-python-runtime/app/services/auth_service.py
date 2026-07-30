@@ -7,7 +7,7 @@ from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import Settings
-from app.core.security import create_access_token, ensure_utc, hash_token, new_refresh_token, utc_now
+from app.core.security import create_access_token, ensure_utc, hash_password, hash_token, new_refresh_token, utc_now, verify_password
 from app.domain.models import Device, RefreshToken, User
 from app.domain.schemas import DeviceOut, InternalAuthContext, LoginRequest, TokenResponse, UserOut
 from app.services.odoo_client import OdooAuthError, OdooClient, OdooClientError
@@ -60,13 +60,14 @@ class AuthService:
         except OdooAuthError as exc:
             raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail=str(exc)) from exc
         except OdooClientError as exc:
-            raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=str(exc)) from exc
+            return await self._login_from_local_cache(session, request, str(exc))
 
         odoo_user = odoo_data.get("user") or {}
         if not odoo_user.get("odoo_user_id"):
             raise HTTPException(status_code=502, detail="Odoo login response is missing user identity.")
 
         user = await self._upsert_user(session, odoo_user, odoo_data)
+        user.local_password_hash = hash_password(request.password)
         device = await self._upsert_device(session, request, user, odoo_data)
         await session.commit()
         await session.refresh(user)
@@ -112,6 +113,22 @@ class AuthService:
                 device.odoo_access_token = None
                 device.odoo_token_expires_at = None
             await session.commit()
+
+    async def _login_from_local_cache(self, session: AsyncSession, request: LoginRequest, upstream_error: str) -> TokenResponse:
+        user = await session.scalar(select(User).where(User.login == request.login.strip()))
+        if not user or not user.active:
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail=f"Odoo unavailable and offline login cache is not available for this user. {upstream_error}",
+            )
+        if not verify_password(request.password, user.local_password_hash):
+            raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid offline credentials.")
+
+        device = await self._upsert_local_device(session, request, user)
+        await session.commit()
+        await session.refresh(user)
+        await session.refresh(device)
+        return await self._issue_tokens(session, user, device)
 
     async def _upsert_user(self, session: AsyncSession, odoo_user: dict[str, Any], raw: dict[str, Any]) -> User:
         user = await session.scalar(select(User).where(User.odoo_user_id == int(odoo_user["odoo_user_id"])))
@@ -167,6 +184,34 @@ class AuthService:
         await session.flush()
         return device
 
+    async def _upsert_local_device(self, session: AsyncSession, request: LoginRequest, user: User) -> Device:
+        device = await session.scalar(
+            select(Device)
+            .where(Device.device_code == request.device_code, Device.status == "active")
+            .order_by(Device.created_at.desc())
+            .limit(1)
+        )
+        values = {
+            "device_name": request.device_name,
+            "platform": request.platform,
+            "app_version": request.app_version,
+            "pos_config_odoo_id": request.pos_config_odoo_id,
+            "warehouse_odoo_id": user.warehouse_odoo_id,
+            "status": "active",
+            "public_key": request.public_key,
+            "last_user_id": user.id,
+            "last_seen_at": utc_now(),
+        }
+        if device:
+            for key, value in values.items():
+                setattr(device, key, value)
+            return device
+
+        device = Device(device_code=request.device_code, **values)
+        session.add(device)
+        await session.flush()
+        return device
+
     async def _issue_tokens(self, session: AsyncSession, user: User, device: Device) -> TokenResponse:
         refresh_token = new_refresh_token()
         expires_at = utc_now() + timedelta(days=self._settings.refresh_token_expire_days)
@@ -200,8 +245,6 @@ class AuthService:
 
 
 def internal_context_out(user: User, device: Device) -> InternalAuthContext:
-    if not device.odoo_access_token:
-        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Device has no active Odoo token.")
     return InternalAuthContext(
         user_id=user.id,
         device_id=device.id,
@@ -213,7 +256,7 @@ def internal_context_out(user: User, device: Device) -> InternalAuthContext:
         warehouse_odoo_id=user.warehouse_odoo_id,
         pos_config_odoo_id=device.pos_config_odoo_id,
         device_code=device.device_code,
-        odoo_access_token=device.odoo_access_token,
+        odoo_access_token=device.odoo_access_token or "",
     )
 
 
