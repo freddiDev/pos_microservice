@@ -46,6 +46,7 @@ and Redis.
 - `GET|POST /api/v1/catalog/bootstrap`
 - `GET|POST /api/v1/catalog/products`
 - `GET /api/v1/catalog/products/:productId`
+- `GET /api/v1/catalog/products/:productId/image`
 - `GET /api/v1/catalog/products/barcode/:barcode`
 - `GET|POST /api/v1/members/bootstrap`
 - `GET|POST /api/v1/members`
@@ -92,6 +93,19 @@ cd services/product-catalog-service
 npm install
 npm test
 npm run build
+```
+
+Product image sync is handled by the catalog worker. The APK only reads cached
+image metadata and bytes from Product Catalog service; it does not call Odoo for
+product images.
+
+Useful catalog image settings:
+
+```env
+CATALOG_IMAGE_SYNC_ENABLED=true
+CATALOG_IMAGE_FIELD=image_128
+CATALOG_IMAGE_SYNC_CONCURRENCY=4
+CATALOG_IMAGE_MAX_BYTES=262144
 ```
 
 Customer member service local checks:

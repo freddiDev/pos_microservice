@@ -1,10 +1,11 @@
 import { Collection, Db, MongoClient } from "mongodb";
 
 import { AppConfig } from "./config.js";
-import { ProductDocument, SyncStateDocument } from "./catalog/normalizers.js";
+import { ProductDocument, ProductImageDocument, SyncStateDocument } from "./catalog/normalizers.js";
 
 export type CatalogCollections = {
   products: Collection<ProductDocument>;
+  productImages: Collection<ProductImageDocument>;
   categories: Collection<Record<string, unknown>>;
   uoms: Collection<Record<string, unknown>>;
   taxes: Collection<Record<string, unknown>>;
@@ -30,6 +31,7 @@ export async function connectMongo(config: AppConfig): Promise<MongoResources> {
   const db = client.db(config.mongoDbName);
   const collections = {
     products: db.collection<ProductDocument>("catalog_products"),
+    productImages: db.collection<ProductImageDocument>("catalog_product_images"),
     categories: db.collection<Record<string, unknown>>("catalog_categories"),
     uoms: db.collection<Record<string, unknown>>("catalog_uoms"),
     taxes: db.collection<Record<string, unknown>>("catalog_taxes"),
@@ -51,6 +53,11 @@ export async function ensureIndexes(collections: CatalogCollections): Promise<vo
     collections.products.createIndex({ barcode: 1, warehouse_odoo_id: 1 }, { name: "idx_barcode_warehouse" }),
     collections.products.createIndex({ warehouse_odoo_id: 1, write_date: 1 }, { name: "idx_warehouse_write_date" }),
     collections.products.createIndex({ odoo_template_id: 1, warehouse_odoo_id: 1 }, { name: "idx_template_warehouse" }),
+    collections.productImages.createIndex(
+      { odoo_product_id: 1, warehouse_odoo_id: 1 },
+      { unique: true, name: "uniq_product_image_warehouse" }
+    ),
+    collections.productImages.createIndex({ checksum: 1 }, { name: "idx_image_checksum" }),
     collections.syncState.createIndex({ pos_config_odoo_id: 1 }, { unique: true, name: "uniq_config_sync" }),
     collections.categories.createIndex({ odoo_id: 1 }, { unique: true, name: "uniq_category" }),
     collections.uoms.createIndex({ odoo_id: 1 }, { unique: true, name: "uniq_uom" }),

@@ -23,7 +23,7 @@ export async function buildApp(config: AppConfig) {
   const mongo = await connectMongo(config);
   const redis = connectRedis(config);
   await redis.connect();
-  const repository = new ProductCatalogRepository(mongo.collections);
+  const repository = new ProductCatalogRepository(mongo.collections, config.apiPrefix);
   const syncWorker = new CatalogSyncWorker(config, repository, redis, app.log);
 
   app.decorate("mongo", mongo);

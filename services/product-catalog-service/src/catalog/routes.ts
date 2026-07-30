@@ -69,6 +69,33 @@ export function registerCatalogRoutes(
     return ok(await service.barcode(context, parsed, params.barcode));
   });
 
+  app.get(`${prefix}/products/:productId/image`, async (request, reply) => {
+    const context = await auth(config, request);
+    const params = productParamsSchema.parse(request.params);
+    const parsed = catalogRequestSchema.parse(request.query);
+    const image = await service.productImage(context, parsed, params.productId);
+    if (!image || image.data.length === 0) {
+      return reply.status(404).send({
+        success: false,
+        code: "PRODUCT_IMAGE_NOT_FOUND",
+        message: "Product image cache not found.",
+        data: {}
+      });
+    }
+
+    const etag = `"${image.etag}"`;
+    if (request.headers["if-none-match"] === etag) {
+      return reply.status(304).header("ETag", etag).send();
+    }
+
+    return reply
+      .header("Content-Type", image.contentType)
+      .header("Content-Length", String(image.size))
+      .header("Cache-Control", "private, max-age=86400")
+      .header("ETag", etag)
+      .send(image.data);
+  });
+
   app.get(`${prefix}/products/:productId`, async (request) => {
     const context = await auth(config, request);
     const params = productParamsSchema.parse(request.params);

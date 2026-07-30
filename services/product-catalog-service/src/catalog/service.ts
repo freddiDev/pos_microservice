@@ -9,6 +9,13 @@ import { ProductCatalogRepository } from "./repository.js";
 
 type CatalogFetcher = typeof fetchOdooCatalog;
 
+export type ProductImagePayload = {
+  contentType: string;
+  data: Buffer;
+  etag: string;
+  size: number;
+};
+
 export class ProductCatalogService {
   private readonly syncLocks = new Map<number, Promise<Record<string, unknown>>>();
 
@@ -121,6 +128,18 @@ export class ProductCatalogService {
     };
   }
 
+  async productImage(context: AuthContext, request: CatalogRequest, productId: number): Promise<ProductImagePayload | null> {
+    const warehouseId = await this.resolveWarehouseId(context, request);
+    const image = await this.repository.findImage(warehouseId, productId);
+    if (!image) return null;
+    return {
+      contentType: image.content_type,
+      data: imageDataBuffer(image.data),
+      etag: image.checksum,
+      size: image.size
+    };
+  }
+
   async status(posConfigId?: number): Promise<Record<string, unknown>> {
     if (!posConfigId) {
       return { ready: true };
@@ -197,9 +216,30 @@ export class ProductCatalogService {
     return value;
   }
 
+  private async resolveWarehouseId(context: AuthContext, request: CatalogRequest): Promise<number> {
+    const explicitWarehouse = request.warehouse_id || context.warehouse_odoo_id;
+    const posConfigId = request.pos_config || request.pos_config_odoo_id || context.pos_config_odoo_id;
+    if (posConfigId) {
+      const state = await this.repository.syncState(posConfigId);
+      if (state?.warehouse_odoo_id) return state.warehouse_odoo_id;
+    }
+    if (explicitWarehouse) return explicitWarehouse;
+    throw badRequest("WAREHOUSE_REQUIRED", "pos_config or warehouse_id is required for product image requests.");
+  }
+
   private clampLimit(value: number): number {
     return Math.min(Math.max(value, 1), this.config.catalogMaxLimit);
   }
+}
+
+function imageDataBuffer(value: unknown): Buffer {
+  if (Buffer.isBuffer(value)) return value;
+  if (value && typeof value === "object" && "buffer" in value) {
+    const buffer = (value as { buffer?: Buffer | Uint8Array }).buffer;
+    if (buffer) return Buffer.from(buffer);
+  }
+  if (value instanceof Uint8Array) return Buffer.from(value);
+  return Buffer.alloc(0);
 }
 
 function emptyPage(offset: number, limit: number): Record<string, unknown> {

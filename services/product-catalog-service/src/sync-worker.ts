@@ -1,7 +1,8 @@
 import type { Redis } from "ioredis";
 
 import type { AppConfig } from "./config.js";
-import { fetchOdooCatalog } from "./odoo-client.js";
+import { normalizeProduct, ProductDocument, ProductImageDocument } from "./catalog/normalizers.js";
+import { fetchOdooCatalog, fetchOdooProductImage } from "./odoo-client.js";
 import type { ProductCatalogRepository } from "./catalog/repository.js";
 
 type Logger = {
@@ -144,26 +145,35 @@ export class CatalogSyncWorker {
 
     let syncedConfigs = 0;
     let syncedProducts = 0;
+    let syncedImages = 0;
+    let failedImages = 0;
     for (const posConfigId of configIds) {
       const result = await this.syncConfig(posConfigId, session.accessToken);
       if (result.locked === true) continue;
       syncedConfigs += 1;
       syncedProducts += result.synced_count;
+      syncedImages += result.images_synced;
+      failedImages += result.images_failed;
     }
 
     return {
       configs_seen: configIds.length,
       configs_synced: syncedConfigs,
-      products_synced: syncedProducts
+      products_synced: syncedProducts,
+      images_synced: syncedImages,
+      images_failed: failedImages
     };
   }
 
-  private async syncConfig(posConfigId: number, accessToken: string): Promise<{ locked?: boolean; synced_count: number }> {
+  private async syncConfig(
+    posConfigId: number,
+    accessToken: string
+  ): Promise<{ locked?: boolean; synced_count: number; images_synced: number; images_failed: number }> {
     const lockKey = `sync:catalog:pos_config:${posConfigId}`;
     const lock = await this.redis.set(lockKey, this.workerId, "PX", this.lockTtlMs, "NX");
     if (lock !== "OK") {
       this.logger.debug({ pos_config: posConfigId }, "Catalog sync skipped because lock is held.");
-      return { locked: true, synced_count: 0 };
+      return { locked: true, synced_count: 0, images_synced: 0, images_failed: 0 };
     }
 
     try {
@@ -171,6 +181,8 @@ export class CatalogSyncWorker {
       const updatedAfter = subtractMinutes(state?.last_odoo_write_date, this.config.syncLookbackMinutes);
       let offset = 0;
       let syncedCount = 0;
+      let imageSyncedCount = 0;
+      let imageFailedCount = 0;
       let hasMore = true;
 
       while (hasMore) {
@@ -183,16 +195,84 @@ export class CatalogSyncWorker {
         await this.repository.upsertSnapshot(posConfigId, snapshot);
 
         const page = pageInfo(snapshot.products);
+        const imageResult = await this.syncImagesForPage(accessToken, page.items);
         syncedCount += page.items.length;
+        imageSyncedCount += imageResult.synced;
+        imageFailedCount += imageResult.failed;
         hasMore = page.hasMore && page.items.length > 0;
         offset += page.items.length;
       }
 
-      return { synced_count: syncedCount };
+      return {
+        synced_count: syncedCount,
+        images_synced: imageSyncedCount,
+        images_failed: imageFailedCount
+      };
     } finally {
       if ((await this.redis.get(lockKey)) === this.workerId) {
         await this.redis.del(lockKey);
       }
+    }
+  }
+
+  private async syncImagesForPage(accessToken: string, items: Record<string, unknown>[]): Promise<{ synced: number; failed: number }> {
+    if (!this.config.catalogImageSyncEnabled || !items.length) {
+      return { synced: 0, failed: 0 };
+    }
+
+    const products = items.map(normalizeProduct);
+    const needingSync = await this.repository.imagesNeedingSync(products);
+    if (!needingSync.length) {
+      return { synced: 0, failed: 0 };
+    }
+
+    const results = await mapWithConcurrency(
+      needingSync,
+      this.config.catalogImageSyncConcurrency,
+      async (product) => this.fetchProductImage(accessToken, product)
+    );
+    const images = results.flatMap((item) => (item.image && item.error === null ? [item.image] : []));
+    if (images.length) {
+      await this.repository.upsertProductImages(images);
+    }
+
+    const failed = results.filter((item) => item.error !== null).length;
+    return { synced: images.length, failed };
+  }
+
+  private async fetchProductImage(
+    accessToken: string,
+    product: ProductDocument
+  ): Promise<{ image: ProductImageDocument | null; error: string | null }> {
+    try {
+      const image = await fetchOdooProductImage(this.config, accessToken, product.odoo_product_id, product.image_url);
+      if (!image) {
+        return { image: null, error: null };
+      }
+      return {
+        image: {
+          odoo_product_id: product.odoo_product_id,
+          warehouse_odoo_id: product.warehouse_odoo_id,
+          content_type: image.contentType,
+          data: image.data,
+          checksum: image.checksum,
+          size: image.size,
+          source_url: image.sourceUrl,
+          source_write_date: product.write_date,
+          synced_at: new Date()
+        },
+        error: null
+      };
+    } catch (error) {
+      this.logger.warn(
+        {
+          product_id: product.odoo_product_id,
+          warehouse_id: product.warehouse_odoo_id,
+          error: errorMessage(error)
+        },
+        "Failed to sync product image."
+      );
+      return { image: null, error: errorMessage(error) };
     }
   }
 
@@ -311,6 +391,24 @@ function pageInfo(source: unknown): { items: Record<string, unknown>[]; hasMore:
     items,
     hasMore: page.has_more === true || page.hasMore === true
   };
+}
+
+async function mapWithConcurrency<T, R>(items: T[], concurrency: number, mapper: (item: T) => Promise<R>): Promise<R[]> {
+  const results = new Array<R>(items.length);
+  let nextIndex = 0;
+  const workerCount = Math.min(Math.max(concurrency, 1), items.length);
+
+  await Promise.all(
+    Array.from({ length: workerCount }, async () => {
+      while (nextIndex < items.length) {
+        const index = nextIndex;
+        nextIndex += 1;
+        results[index] = await mapper(items[index]);
+      }
+    })
+  );
+
+  return results;
 }
 
 function subtractMinutes(value: string | null | undefined, minutes: number): string | undefined {

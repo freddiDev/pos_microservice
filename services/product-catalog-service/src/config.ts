@@ -14,6 +14,10 @@ const envSchema = z.object({
   REDIS_URL: z.string().min(1).default("redis://redis:6379"),
   CATALOG_CACHE_TTL_SECONDS: z.coerce.number().int().min(30).default(300),
   CATALOG_MAX_LIMIT: z.coerce.number().int().min(1).max(5000).default(1000),
+  CATALOG_IMAGE_SYNC_ENABLED: booleanEnv(true),
+  CATALOG_IMAGE_FIELD: z.string().trim().min(1).default("image_128"),
+  CATALOG_IMAGE_SYNC_CONCURRENCY: z.coerce.number().int().min(1).max(16).default(4),
+  CATALOG_IMAGE_MAX_BYTES: z.coerce.number().int().min(1024).default(262144),
   SYNC_WORKER_ENABLED: booleanEnv(false),
   SYNC_WORKER_INTERVAL_SECONDS: z.coerce.number().positive().default(60),
   SYNC_WORKER_INITIAL_DELAY_SECONDS: z.coerce.number().min(0).default(5),
@@ -40,6 +44,10 @@ export type AppConfig = {
   redisUrl: string;
   cacheTtlSeconds: number;
   catalogMaxLimit: number;
+  catalogImageSyncEnabled: boolean;
+  catalogImageField: string;
+  catalogImageSyncConcurrency: number;
+  catalogImageMaxBytes: number;
   syncWorkerEnabled: boolean;
   syncWorkerIntervalMs: number;
   syncWorkerInitialDelayMs: number;
@@ -68,6 +76,10 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
     redisUrl: parsed.REDIS_URL,
     cacheTtlSeconds: parsed.CATALOG_CACHE_TTL_SECONDS,
     catalogMaxLimit: parsed.CATALOG_MAX_LIMIT,
+    catalogImageSyncEnabled: parsed.CATALOG_IMAGE_SYNC_ENABLED,
+    catalogImageField: parsed.CATALOG_IMAGE_FIELD,
+    catalogImageSyncConcurrency: parsed.CATALOG_IMAGE_SYNC_CONCURRENCY,
+    catalogImageMaxBytes: parsed.CATALOG_IMAGE_MAX_BYTES,
     syncWorkerEnabled: parsed.SYNC_WORKER_ENABLED,
     syncWorkerIntervalMs: parsed.SYNC_WORKER_INTERVAL_SECONDS * 1000,
     syncWorkerInitialDelayMs: parsed.SYNC_WORKER_INITIAL_DELAY_SECONDS * 1000,

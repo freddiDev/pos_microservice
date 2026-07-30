@@ -14,7 +14,23 @@ export type ProductDocument = {
   categ_id: number | null;
   write_date: string | null;
   image_url: string | null;
+  has_image?: boolean;
+  image_hash?: string | null;
+  image_content_type?: string | null;
+  image_synced_at?: Date | null;
   raw: Record<string, unknown>;
+};
+
+export type ProductImageDocument = {
+  odoo_product_id: number;
+  warehouse_odoo_id: number;
+  content_type: string;
+  data: Buffer;
+  checksum: string;
+  size: number;
+  source_url: string;
+  source_write_date: string | null;
+  synced_at: Date;
 };
 
 export type SyncStateDocument = {
@@ -53,7 +69,7 @@ export function normalizeProduct(input: Record<string, unknown>): ProductDocumen
   };
 }
 
-export function productToApi(document: ProductDocument): Record<string, unknown> {
+export function productToApi(document: ProductDocument, apiPrefix = "/api/v1"): Record<string, unknown> {
   return {
     id: document.odoo_product_id,
     name: document.name,
@@ -63,7 +79,9 @@ export function productToApi(document: ProductDocument): Record<string, unknown>
     taxes_id: document.taxes_id,
     categ_id: document.categ_id,
     write_date: document.write_date,
-    image_url: document.image_url,
+    image_url: document.has_image ? `${apiPrefix}/catalog/products/${document.odoo_product_id}/image` : null,
+    has_image: document.has_image === true,
+    image_hash: document.image_hash || null,
     product_tmpl_id: document.odoo_template_id,
     warehouse_id: document.warehouse_odoo_id,
     warehouse_name: document.warehouse_name,

@@ -1,7 +1,7 @@
 import { Filter } from "mongodb";
 
 import { CatalogCollections } from "../db.js";
-import { normalizeProduct, ProductDocument, productToApi, SyncStateDocument, toNumber } from "./normalizers.js";
+import { normalizeProduct, ProductDocument, ProductImageDocument, productToApi, SyncStateDocument, toNumber } from "./normalizers.js";
 
 export type ProductListOptions = {
   warehouseId: number;
@@ -11,7 +11,10 @@ export type ProductListOptions = {
 };
 
 export class ProductCatalogRepository {
-  constructor(private readonly collections: CatalogCollections) {}
+  constructor(
+    private readonly collections: CatalogCollections,
+    private readonly apiPrefix = "/api/v1"
+  ) {}
 
   async upsertSnapshot(posConfigId: number, snapshot: Record<string, unknown>): Promise<SyncStateDocument> {
     const productItems = extractItems(snapshot.products);
@@ -73,7 +76,7 @@ export class ProductCatalogRepository {
     ]);
 
     return {
-      items: items.map(productToApi),
+      items: items.map((item) => productToApi(item, this.apiPrefix)),
       offset: options.offset,
       limit: options.limit,
       total,
@@ -86,7 +89,7 @@ export class ProductCatalogRepository {
       { warehouse_odoo_id: warehouseId, barcode },
       { projection: { _id: 0, raw: 0 } }
     );
-    return document ? productToApi(document) : null;
+    return document ? productToApi(document, this.apiPrefix) : null;
   }
 
   async findByOdooId(warehouseId: number, productId: number): Promise<Record<string, unknown> | null> {
@@ -94,7 +97,76 @@ export class ProductCatalogRepository {
       { warehouse_odoo_id: warehouseId, odoo_product_id: productId },
       { projection: { _id: 0, raw: 0 } }
     );
-    return document ? productToApi(document) : null;
+    return document ? productToApi(document, this.apiPrefix) : null;
+  }
+
+  async imagesNeedingSync(products: ProductDocument[]): Promise<ProductDocument[]> {
+    const candidates = products.filter((product) => Boolean(product.image_url));
+    if (!candidates.length) return [];
+
+    const existing = await this.collections.productImages
+      .find(
+        {
+          $or: candidates.map((product) => ({
+            odoo_product_id: product.odoo_product_id,
+            warehouse_odoo_id: product.warehouse_odoo_id
+          }))
+        },
+        { projection: { _id: 0, odoo_product_id: 1, warehouse_odoo_id: 1, source_url: 1, source_write_date: 1 } }
+      )
+      .toArray();
+    const existingByKey = new Map(existing.map((image) => [productImageKey(image), image]));
+
+    return candidates.filter((product) => {
+      const image = existingByKey.get(productImageKey(product));
+      if (!image) return true;
+      return image.source_url !== product.image_url || image.source_write_date !== product.write_date;
+    });
+  }
+
+  async upsertProductImages(images: ProductImageDocument[]): Promise<void> {
+    if (!images.length) return;
+    await Promise.all([
+      this.collections.productImages.bulkWrite(
+        images.map((image) => ({
+          updateOne: {
+            filter: {
+              odoo_product_id: image.odoo_product_id,
+              warehouse_odoo_id: image.warehouse_odoo_id
+            },
+            update: { $set: image },
+            upsert: true
+          }
+        })),
+        { ordered: false }
+      ),
+      this.collections.products.bulkWrite(
+        images.map((image) => ({
+          updateOne: {
+            filter: {
+              odoo_product_id: image.odoo_product_id,
+              warehouse_odoo_id: image.warehouse_odoo_id
+            },
+            update: {
+              $set: {
+                has_image: true,
+                image_hash: image.checksum,
+                image_content_type: image.content_type,
+                image_synced_at: image.synced_at
+              }
+            }
+          }
+        })),
+        { ordered: false }
+      )
+    ]);
+  }
+
+  async findImage(warehouseId: number, productId: number): Promise<ProductImageDocument | null> {
+    return this.collections.productImages.findOne(
+      { warehouse_odoo_id: warehouseId, odoo_product_id: productId },
+      { projection: { _id: 0 } }
+    );
   }
 
   private async upsertProducts(products: ProductDocument[]): Promise<void> {
@@ -132,6 +204,10 @@ export class ProductCatalogRepository {
       { ordered: false }
     );
   }
+}
+
+function productImageKey(product: Pick<ProductDocument | ProductImageDocument, "odoo_product_id" | "warehouse_odoo_id">): string {
+  return `${product.warehouse_odoo_id}:${product.odoo_product_id}`;
 }
 
 function extractItems(source: unknown): Record<string, unknown>[] {
