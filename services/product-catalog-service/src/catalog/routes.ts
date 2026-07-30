@@ -2,6 +2,7 @@ import { FastifyInstance, FastifyRequest } from "fastify";
 
 import { resolveAuthContext } from "../auth-context.js";
 import { AppConfig } from "../config.js";
+import { HttpError } from "../errors.js";
 import { ProductCatalogRepository } from "./repository.js";
 import { ProductCatalogService } from "./service.js";
 import { barcodeParamsSchema, catalogRequestSchema, productParamsSchema } from "./schemas.js";
@@ -32,6 +33,21 @@ export function registerCatalogRoutes(
     const context = await auth(config, request);
     const parsed = catalogRequestSchema.parse(request.body || {});
     return ok(await service.bootstrap(context, parsed));
+  });
+
+  app.get(`${prefix}/sync/status`, async (request) => {
+    const query = request.query as Record<string, unknown>;
+    const posConfig = query.pos_config ? Number(query.pos_config) : undefined;
+    return ok(await service.status(posConfig));
+  });
+
+  app.get(`${prefix}/sync/worker/status`, async () => {
+    return ok(await app.catalogSyncWorker.status());
+  });
+
+  app.post(`${prefix}/sync/ensure`, async (request) => {
+    assertInternalRequest(config, request);
+    return ok(await app.catalogSyncWorker.syncOnce());
   });
 
   app.get(`${prefix}/products`, async (request) => {
@@ -72,4 +88,11 @@ function ok(data: Record<string, unknown>) {
     message: "OK",
     data
   };
+}
+
+function assertInternalRequest(config: AppConfig, request: FastifyRequest): void {
+  const key = request.headers["x-internal-service-key"];
+  if (key !== config.internalServiceKey) {
+    throw new HttpError(403, "FORBIDDEN", "Invalid internal service key.");
+  }
 }

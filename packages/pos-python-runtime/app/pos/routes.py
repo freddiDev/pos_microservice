@@ -57,6 +57,14 @@ async def get_pos_config(
     return await service.get_config(db, token, odoo_config_id)
 
 
+@router.get("/pos/sync/status")
+async def pos_sync_status(request: Request) -> dict:
+    worker = getattr(request.app.state, "pos_sync_worker", None)
+    if worker is None:
+        return {"domain": "pos", "enabled": False, "running": False}
+    return worker.status()
+
+
 @router.post("/pos/sessions", response_model=PosSessionOut)
 async def open_pos_session(
     body: OpenSessionRequest,

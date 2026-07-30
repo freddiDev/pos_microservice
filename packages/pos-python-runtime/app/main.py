@@ -8,6 +8,7 @@ from app.api.router import include_service_routes
 from app.core.config import Settings, get_settings
 from app.core.database import build_engine, build_session_factory, init_database
 from app.gateway.router import include_gateway_routes
+from app.pos.sync_worker import PosSyncWorker
 
 
 @asynccontextmanager
@@ -34,12 +35,17 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             base_url=str(settings.auth_service_url).rstrip("/"),
             timeout=settings.request_timeout_seconds,
         )
+        worker = PosSyncWorker(settings, app.state.db_session_factory, app.state.odoo_http)
+        app.state.pos_sync_worker = worker
+        worker.start()
     elif settings.service_role == "gateway":
         app.state.gateway_http = httpx.AsyncClient(timeout=settings.request_timeout_seconds)
 
     try:
         yield
     finally:
+        if hasattr(app.state, "pos_sync_worker"):
+            await app.state.pos_sync_worker.stop()
         if hasattr(app.state, "odoo_http"):
             await app.state.odoo_http.aclose()
         if hasattr(app.state, "gateway_http"):

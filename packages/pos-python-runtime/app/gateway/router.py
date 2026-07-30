@@ -12,6 +12,7 @@ AUTH_PREFIXES = (
 
 POS_PREFIXES = (
     "pos-configs",
+    "pos/sync",
     "pos/sessions",
 )
 

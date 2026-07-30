@@ -13,7 +13,17 @@ const envSchema = z.object({
   CATALOG_MONGO_DB: z.string().min(1).default("pos_catalog_db"),
   REDIS_URL: z.string().min(1).default("redis://redis:6379"),
   CATALOG_CACHE_TTL_SECONDS: z.coerce.number().int().min(30).default(300),
-  CATALOG_MAX_LIMIT: z.coerce.number().int().min(1).max(5000).default(1000)
+  CATALOG_MAX_LIMIT: z.coerce.number().int().min(1).max(5000).default(1000),
+  SYNC_WORKER_ENABLED: booleanEnv(false),
+  SYNC_WORKER_INTERVAL_SECONDS: z.coerce.number().positive().default(60),
+  SYNC_WORKER_INITIAL_DELAY_SECONDS: z.coerce.number().min(0).default(5),
+  SYNC_WORKER_RETRY_MIN_SECONDS: z.coerce.number().positive().default(30),
+  SYNC_WORKER_RETRY_MAX_SECONDS: z.coerce.number().positive().default(300),
+  SYNC_LOOKBACK_MINUTES: z.coerce.number().int().min(0).default(5),
+  ODOO_SYNC_USERNAME: optionalNonEmptyString(),
+  ODOO_SYNC_PASSWORD: optionalNonEmptyString(),
+  ODOO_SYNC_DEVICE_CODE: z.string().trim().min(1).default("product-catalog-sync-worker"),
+  CATALOG_SYNC_POS_CONFIG_IDS: z.string().default("")
 });
 
 export type AppConfig = {
@@ -30,6 +40,16 @@ export type AppConfig = {
   redisUrl: string;
   cacheTtlSeconds: number;
   catalogMaxLimit: number;
+  syncWorkerEnabled: boolean;
+  syncWorkerIntervalMs: number;
+  syncWorkerInitialDelayMs: number;
+  syncWorkerRetryMinMs: number;
+  syncWorkerRetryMaxMs: number;
+  syncLookbackMinutes: number;
+  odooSyncUsername?: string;
+  odooSyncPassword?: string;
+  odooSyncDeviceCode: string;
+  catalogSyncPosConfigIds: number[];
 };
 
 export function loadConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
@@ -47,7 +67,17 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
     mongoDbName: parsed.CATALOG_MONGO_DB,
     redisUrl: parsed.REDIS_URL,
     cacheTtlSeconds: parsed.CATALOG_CACHE_TTL_SECONDS,
-    catalogMaxLimit: parsed.CATALOG_MAX_LIMIT
+    catalogMaxLimit: parsed.CATALOG_MAX_LIMIT,
+    syncWorkerEnabled: parsed.SYNC_WORKER_ENABLED,
+    syncWorkerIntervalMs: parsed.SYNC_WORKER_INTERVAL_SECONDS * 1000,
+    syncWorkerInitialDelayMs: parsed.SYNC_WORKER_INITIAL_DELAY_SECONDS * 1000,
+    syncWorkerRetryMinMs: parsed.SYNC_WORKER_RETRY_MIN_SECONDS * 1000,
+    syncWorkerRetryMaxMs: parsed.SYNC_WORKER_RETRY_MAX_SECONDS * 1000,
+    syncLookbackMinutes: parsed.SYNC_LOOKBACK_MINUTES,
+    odooSyncUsername: parsed.ODOO_SYNC_USERNAME,
+    odooSyncPassword: parsed.ODOO_SYNC_PASSWORD,
+    odooSyncDeviceCode: parsed.ODOO_SYNC_DEVICE_CODE,
+    catalogSyncPosConfigIds: parseNumberList(parsed.CATALOG_SYNC_POS_CONFIG_IDS)
   };
 }
 
@@ -59,4 +89,30 @@ function normalizePrefix(value: string): string {
   const trimmed = value.trim();
   if (!trimmed) return "";
   return `/${trimmed.replace(/^\/+|\/+$/g, "")}`;
+}
+
+function optionalNonEmptyString() {
+  return z.preprocess((value) => {
+    if (typeof value !== "string") return value;
+    const trimmed = value.trim();
+    return trimmed ? trimmed : undefined;
+  }, z.string().optional());
+}
+
+function booleanEnv(defaultValue: boolean) {
+  return z.preprocess((value) => {
+    if (value === undefined || value === null || value === "") return defaultValue;
+    if (typeof value === "boolean") return value;
+    const normalized = String(value).trim().toLowerCase();
+    if (["1", "true", "yes", "y", "on"].includes(normalized)) return true;
+    if (["0", "false", "no", "n", "off"].includes(normalized)) return false;
+    return value;
+  }, z.boolean().default(defaultValue));
+}
+
+function parseNumberList(value: string): number[] {
+  return value
+    .split(",")
+    .map((item) => Number(item.trim()))
+    .filter((item) => Number.isInteger(item) && item > 0);
 }

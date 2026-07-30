@@ -35,25 +35,18 @@ class PosService:
 
     async def list_configs(self, db: AsyncSession, bearer_token: str) -> PosConfigListOut:
         principal = await self._auth_client.resolve(bearer_token)
-        items = await self._odoo_client.list_configs(principal.odoo_access_token)
-        configs = []
-        for item in items:
-            config = await self._configs.upsert_config(db, item)
-            session_payload = await self._sync_config_session(db, principal, config, item)
-            configs.append(_config_out(config, item.get("payment_methods") or [], session=session_payload))
-        await db.commit()
-        return PosConfigListOut(items=configs)
+        return await self._cached_config_list(
+            db,
+            principal,
+            HTTPException(status_code=status.HTTP_409_CONFLICT, detail="POS config cache is not ready."),
+        )
 
     async def get_config(self, db: AsyncSession, bearer_token: str, odoo_config_id: int) -> PosConfigOut:
         principal = await self._auth_client.resolve(bearer_token)
-        items = await self._odoo_client.list_configs(principal.odoo_access_token)
-        selected = next((item for item in items if int(item.get("odoo_config_id") or 0) == odoo_config_id), None)
-        if not selected:
-            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="POS config not found.")
-        config = await self._configs.upsert_config(db, selected)
-        session_payload = await self._sync_config_session(db, principal, config, selected)
-        await db.commit()
-        return _config_out(config, selected.get("payment_methods") or [], session=session_payload)
+        config = await self._configs.get_by_odoo_id(db, odoo_config_id)
+        if config and _config_allowed_for_principal(config, principal):
+            return await self._cached_config_out(db, config)
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="POS config cache not found.")
 
     async def open_session(
         self,
@@ -71,80 +64,27 @@ class PosService:
             if completed and completed.response_body:
                 return PosSessionOut.model_validate(completed.response_body["session"])
 
-        config = await self._sync_single_config(db, principal, request.pos_config)
-        odoo_session = await self._odoo_client.open_session(
-            principal.odoo_access_token,
-            odoo_config_id=request.pos_config,
-            opening_cash=request.opening_cash,
-            opening_notes=request.opening_notes,
-        )
-        session_row = await self._sessions.upsert_session(
-            db,
-            _session_payload(odoo_session),
-            config=config,
-            user_id=principal.user_id,
-            device_id=principal.device_id,
-            device_code=principal.device_code,
-            odoo_user_id=principal.odoo_user_id,
-        )
-        await self._sessions.event(
-            db,
-            event_type="session_opened_or_reused",
-            pos_session=session_row,
-            actor_user_id=principal.user_id,
-            device_id=principal.device_id,
-            payload=request_body,
-            result=odoo_session,
-        )
-        output = _session_out(session_row)
-        if idempotency_key:
-            await self._idempotency.store_completed(
-                db,
-                key=idempotency_key,
-                actor_user_id=principal.user_id,
-                device_id=principal.device_id,
-                method="POST",
-                path="/api/v1/pos/sessions",
-                request_body=request_body,
-                response_status=200,
-                response_body={"session": output.model_dump(mode="json")},
-            )
-        await db.commit()
-        return output
+        config = await self._cached_single_config(db, principal, request.pos_config)
+        row = await self._sessions.current_for_config(db, config.odoo_config_id)
+        if row:
+            return _session_out(row)
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="POS session cache is not ready.")
 
     async def current_session(self, db: AsyncSession, bearer_token: str, odoo_config_id: int) -> PosSessionOut:
         principal = await self._auth_client.resolve(bearer_token)
-        config = await self._sync_single_config(db, principal, odoo_config_id)
+        config = await self._cached_single_config(db, principal, odoo_config_id)
         row = await self._sessions.current_for_config(db, config.odoo_config_id)
         if not row:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="No active POS session for config.")
-        detail = _session_payload(await self._odoo_client.session_detail(principal.odoo_access_token, odoo_session_id=row.odoo_session_id))
-        row = await self._sessions.upsert_session(
-            db,
-            detail,
-            config=config,
-            user_id=principal.user_id,
-            device_id=principal.device_id,
-            device_code=principal.device_code,
-            odoo_user_id=principal.odoo_user_id,
-        )
-        await db.commit()
         return _session_out(row)
 
     async def session_detail(self, db: AsyncSession, bearer_token: str, odoo_session_id: int) -> PosSessionOut:
         principal = await self._auth_client.resolve(bearer_token)
-        detail = _session_payload(await self._odoo_client.session_detail(principal.odoo_access_token, odoo_session_id=odoo_session_id))
-        config = await self._sync_single_config(db, principal, int(detail.get("odoo_config_id") or detail.get("config_id")))
-        row = await self._sessions.upsert_session(
-            db,
-            detail,
-            config=config,
-            user_id=principal.user_id,
-            device_id=principal.device_id,
-            device_code=principal.device_code,
-            odoo_user_id=principal.odoo_user_id,
-        )
-        await db.commit()
+        row = await self._sessions.get_by_odoo_id(db, odoo_session_id)
+        if not row:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="POS session cache not found.")
+        if row.company_odoo_id is not None and principal.company_odoo_id is not None and row.company_odoo_id != principal.company_odoo_id:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="POS session cache not found.")
         return _session_out(row)
 
     async def opening_cash(self, db: AsyncSession, bearer_token: str, odoo_session_id: int, request: OpeningCashRequest) -> PosSessionOut:
@@ -249,6 +189,49 @@ class PosService:
         if not selected:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="POS config not allowed or not found.")
         return await self._configs.upsert_config(db, selected)
+
+    async def _sync_single_config_or_cached(self, db: AsyncSession, principal: AuthPrincipal, odoo_config_id: int) -> models.PosConfig:
+        try:
+            return await self._sync_single_config(db, principal, odoo_config_id)
+        except HTTPException as exc:
+            config = await self._configs.get_by_odoo_id(db, odoo_config_id)
+            if config and _config_allowed_for_principal(config, principal):
+                return config
+            raise exc
+
+    async def _cached_single_config(self, db: AsyncSession, principal: AuthPrincipal, odoo_config_id: int) -> models.PosConfig:
+        config = await self._configs.get_by_odoo_id(db, odoo_config_id)
+        if config and _config_allowed_for_principal(config, principal):
+            return config
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="POS config cache not found.")
+
+    async def _cached_config_list(
+        self,
+        db: AsyncSession,
+        principal: AuthPrincipal,
+        upstream_error: HTTPException,
+    ) -> PosConfigListOut:
+        configs = await self._configs.list_configs(db, company_odoo_id=principal.company_odoo_id)
+        if not configs:
+            raise upstream_error
+        return PosConfigListOut(items=[await self._cached_config_out(db, config) for config in configs])
+
+    async def _cached_config_out(self, db: AsyncSession, config: models.PosConfig) -> PosConfigOut:
+        raw = config.raw_odoo_payload or {}
+        session_payload = None
+        if config.current_session_odoo_id is not None:
+            row = await self._sessions.get_by_odoo_id(db, config.current_session_odoo_id)
+            if row:
+                session_payload = _session_out(row).mobile_dict()
+        if session_payload is None:
+            row = await self._sessions.current_for_config(db, config.odoo_config_id)
+            if row:
+                session_payload = _session_out(row).mobile_dict()
+        if session_payload is None:
+            raw_session = _config_session_payload(raw)
+            if raw_session:
+                session_payload = _mobile_session_dict(raw_session, config)
+        return _config_out(config, raw.get("payment_methods") or [], session=session_payload)
 
     async def _sync_config_session(
         self,
@@ -487,6 +470,12 @@ def _closing_out(odoo_session_id: int, data: dict[str, Any]) -> ClosingControlOu
         other_payment_methods=data.get("other_payment_methods") or [],
         raw_closing_data=data,
     )
+
+
+def _config_allowed_for_principal(config: models.PosConfig, principal: AuthPrincipal) -> bool:
+    if principal.company_odoo_id is not None and config.company_odoo_id is not None:
+        return config.company_odoo_id == principal.company_odoo_id
+    return True
 
 
 def _float(value: Any) -> float | None:

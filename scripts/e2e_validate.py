@@ -1,3 +1,4 @@
+import hashlib
 import os
 import socket
 import tempfile
@@ -150,6 +151,15 @@ def fake_odoo_app() -> FastAPI:
                                 "active": True,
                             }
                         ],
+                        "cashiers": [
+                            {
+                                "id": 7,
+                                "odoo_user_id": 7,
+                                "name": "Cashier Example",
+                                "login": "cashier@example.com",
+                                "pos_pin": "1234",
+                            }
+                        ],
                     }
                 ]
             },
@@ -299,6 +309,10 @@ def main() -> None:
             configs.raise_for_status()
             assert configs.json()["items"][0]["odoo_config_id"] == 12
             assert configs.json()["items"][0]["payment_methods"][0]["odoo_payment_method_id"] == 1
+            cashier = configs.json()["items"][0]["cashiers"][0]
+            assert cashier["has_pos_pin"] is True
+            assert cashier["pos_pin_hash"] == hashlib.sha256(b"7:1234").hexdigest()
+            assert "pos_pin" not in cashier
 
             session_open = client.post(
                 "/api/v1/pos/sessions",

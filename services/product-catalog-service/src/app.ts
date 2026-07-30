@@ -9,6 +9,7 @@ import { HttpError } from "./errors.js";
 import { connectRedis } from "./redis.js";
 import { ProductCatalogRepository } from "./catalog/repository.js";
 import { registerCatalogRoutes } from "./catalog/routes.js";
+import { CatalogSyncWorker } from "./sync-worker.js";
 
 export async function buildApp(config: AppConfig) {
   const app = Fastify({
@@ -23,9 +24,11 @@ export async function buildApp(config: AppConfig) {
   const redis = connectRedis(config);
   await redis.connect();
   const repository = new ProductCatalogRepository(mongo.collections);
+  const syncWorker = new CatalogSyncWorker(config, repository, redis, app.log);
 
   app.decorate("mongo", mongo);
   app.decorate("catalogRedis", redis);
+  app.decorate("catalogSyncWorker", syncWorker);
 
   app.get("/health/live", async () => ({ status: "ok" }));
   app.get("/health/ready", async () => {
@@ -35,6 +38,7 @@ export async function buildApp(config: AppConfig) {
   });
 
   registerCatalogRoutes(app, config, repository, redis);
+  syncWorker.start();
 
   app.setErrorHandler((error, _request, reply) => {
     if (error instanceof ZodError) {
@@ -63,6 +67,7 @@ export async function buildApp(config: AppConfig) {
   });
 
   app.addHook("onClose", async () => {
+    syncWorker.stop();
     await redis.quit();
     await mongo.client.close();
   });
@@ -74,5 +79,6 @@ declare module "fastify" {
   interface FastifyInstance {
     mongo: MongoResources;
     catalogRedis: Redis;
+    catalogSyncWorker: CatalogSyncWorker;
   }
 }

@@ -11,8 +11,16 @@ from app.pos import models
 
 
 class PosConfigRepository:
-    async def list_configs(self, session: AsyncSession) -> list[models.PosConfig]:
-        result = await session.scalars(select(models.PosConfig).where(models.PosConfig.active.is_(True)).order_by(models.PosConfig.name))
+    async def list_configs(
+        self,
+        session: AsyncSession,
+        *,
+        company_odoo_id: int | None = None,
+    ) -> list[models.PosConfig]:
+        query = select(models.PosConfig).where(models.PosConfig.active.is_(True))
+        if company_odoo_id is not None:
+            query = query.where(models.PosConfig.company_odoo_id == company_odoo_id)
+        result = await session.scalars(query.order_by(models.PosConfig.name))
         return list(result)
 
     async def get_by_odoo_id(self, session: AsyncSession, odoo_config_id: int) -> models.PosConfig | None:

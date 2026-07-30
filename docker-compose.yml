@@ -7,6 +7,17 @@ x-common-env: &common_env
   REFRESH_TOKEN_EXPIRE_DAYS: ${REFRESH_TOKEN_EXPIRE_DAYS:?REFRESH_TOKEN_EXPIRE_DAYS is required}
   REQUEST_TIMEOUT_SECONDS: ${REQUEST_TIMEOUT_SECONDS:?REQUEST_TIMEOUT_SECONDS is required}
 
+x-sync-env: &sync_env
+  SYNC_WORKER_ENABLED: ${SYNC_WORKER_ENABLED:-false}
+  SYNC_WORKER_INTERVAL_SECONDS: ${SYNC_WORKER_INTERVAL_SECONDS:-60}
+  SYNC_WORKER_INITIAL_DELAY_SECONDS: ${SYNC_WORKER_INITIAL_DELAY_SECONDS:-5}
+  SYNC_WORKER_RETRY_MIN_SECONDS: ${SYNC_WORKER_RETRY_MIN_SECONDS:-30}
+  SYNC_WORKER_RETRY_MAX_SECONDS: ${SYNC_WORKER_RETRY_MAX_SECONDS:-300}
+  SYNC_LOOKBACK_MINUTES: ${SYNC_LOOKBACK_MINUTES:-5}
+  ODOO_SYNC_USERNAME: ${ODOO_SYNC_USERNAME:-}
+  ODOO_SYNC_PASSWORD: ${ODOO_SYNC_PASSWORD:-}
+  ODOO_SYNC_DEVICE_CODE: ${ODOO_SYNC_DEVICE_CODE:-pos-sync-worker}
+
 x-python-build: &python_build
   context: .
   args:
@@ -73,7 +84,7 @@ services:
       dockerfile: services/pos-config-session-service/Dockerfile
     container_name: pos-ms-pos
     environment:
-      <<: *common_env
+      <<: [*common_env, *sync_env]
       APP_NAME: ${POS_APP_NAME:?POS_APP_NAME is required}
       SERVICE_ROLE: ${POS_SERVICE_ROLE:?POS_SERVICE_ROLE is required}
       DATABASE_URL: ${POS_DATABASE_URL:?POS_DATABASE_URL is required}
@@ -96,6 +107,7 @@ services:
       network: host
     container_name: pos-ms-product
     environment:
+      <<: *sync_env
       NODE_ENV: ${ENVIRONMENT:?ENVIRONMENT is required}
       API_PREFIX: ${API_PREFIX:?API_PREFIX is required}
       PRODUCT_SERVICE_HOST: ${PRODUCT_SERVICE_HOST:?PRODUCT_SERVICE_HOST is required}
@@ -109,6 +121,7 @@ services:
       REDIS_URL: ${REDIS_URL:?REDIS_URL is required}
       CATALOG_CACHE_TTL_SECONDS: ${CATALOG_CACHE_TTL_SECONDS:?CATALOG_CACHE_TTL_SECONDS is required}
       CATALOG_MAX_LIMIT: ${CATALOG_MAX_LIMIT:?CATALOG_MAX_LIMIT is required}
+      CATALOG_SYNC_POS_CONFIG_IDS: ${CATALOG_SYNC_POS_CONFIG_IDS:-}
     ports:
       - "${PRODUCT_SERVICE_HOST_PORT:?PRODUCT_SERVICE_HOST_PORT is required}:${PRODUCT_SERVICE_PORT:?PRODUCT_SERVICE_PORT is required}"
     depends_on:
@@ -127,6 +140,7 @@ services:
       network: host
     container_name: pos-ms-member
     environment:
+      <<: *sync_env
       NODE_ENV: ${ENVIRONMENT:?ENVIRONMENT is required}
       API_PREFIX: ${API_PREFIX:?API_PREFIX is required}
       MEMBER_SERVICE_HOST: ${MEMBER_SERVICE_HOST:?MEMBER_SERVICE_HOST is required}

@@ -3,6 +3,7 @@ import type { Redis } from "ioredis";
 
 import { resolveAuthContext } from "../auth-context.js";
 import { AppConfig } from "../config.js";
+import { HttpError } from "../errors.js";
 import { MemberRepository } from "./repository.js";
 import { CustomerMemberService } from "./service.js";
 import { memberRequestSchema, partnerParamsSchema } from "./schemas.js";
@@ -32,6 +33,21 @@ export function registerMemberRoutes(
     const context = await auth(config, request);
     const parsed = memberRequestSchema.parse(request.body || {});
     return ok(await service.bootstrap(context, parsed));
+  });
+
+  app.get(`${prefix}/sync/status`, async (request) => {
+    const query = request.query as Record<string, unknown>;
+    const companyId = query.company_id ? Number(query.company_id) : undefined;
+    return ok(await service.status(companyId));
+  });
+
+  app.get(`${prefix}/sync/worker/status`, async () => {
+    return ok(await app.memberSyncWorker.status());
+  });
+
+  app.post(`${prefix}/sync/ensure`, async (request) => {
+    assertInternalRequest(config, request);
+    return ok(await app.memberSyncWorker.syncOnce());
   });
 
   app.get(prefix, async (request) => {
@@ -84,4 +100,11 @@ function ok(data: Record<string, unknown>) {
     message: "OK",
     data
   };
+}
+
+function assertInternalRequest(config: AppConfig, request: FastifyRequest): void {
+  const key = request.headers["x-internal-service-key"];
+  if (key !== config.internalServiceKey) {
+    throw new HttpError(403, "FORBIDDEN", "Invalid internal service key.");
+  }
 }

@@ -29,13 +29,19 @@ export class ProductCatalogRepository {
       this.upsertSimpleCollection(this.collections.productTemplateCv, snapshot.product_template_cv, "id")
     ]);
 
+    const [existingState, productCount] = await Promise.all([
+      this.syncState(posConfigId),
+      this.collections.products.countDocuments({ warehouse_odoo_id: warehouseId })
+    ]);
+    const latest = latestWriteDate(products) || existingState?.last_odoo_write_date || null;
+
     const state: SyncStateDocument = {
       pos_config_odoo_id: posConfigId,
       warehouse_odoo_id: warehouseId,
       warehouse_name: warehouseName,
-      product_count: products.length,
+      product_count: productCount,
       last_synced_at: new Date(),
-      last_odoo_write_date: latestWriteDate(products)
+      last_odoo_write_date: latest
     };
 
     await this.collections.syncState.updateOne(

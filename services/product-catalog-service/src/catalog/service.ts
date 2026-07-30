@@ -7,35 +7,78 @@ import { fetchOdooCatalog } from "../odoo-client.js";
 import { CatalogRequest } from "./schemas.js";
 import { ProductCatalogRepository } from "./repository.js";
 
+type CatalogFetcher = typeof fetchOdooCatalog;
+
 export class ProductCatalogService {
+  private readonly syncLocks = new Map<number, Promise<Record<string, unknown>>>();
+
   constructor(
     private readonly config: AppConfig,
     private readonly repository: ProductCatalogRepository,
-    private readonly redis: Redis
+    private readonly redis: Redis,
+    private readonly catalogFetcher: CatalogFetcher = fetchOdooCatalog
   ) {}
 
   async bootstrap(context: AuthContext, request: CatalogRequest): Promise<Record<string, unknown>> {
     const posConfigId = this.resolvePosConfigId(context, request);
-    const snapshot = await this.fetchAndStore(context, posConfigId, request);
-    return snapshot;
+    return this.fetchAndStore(context, posConfigId, request);
+  }
+
+  async ensureSync(context: AuthContext, request: CatalogRequest): Promise<Record<string, unknown>> {
+    const posConfigId = this.resolvePosConfigId(context, request);
+    const state = await this.repository.syncState(posConfigId);
+    if (state && !request.refresh) {
+      return { ready: true, refreshed: false, sync_state: state };
+    }
+
+    const existingTask = this.syncLocks.get(posConfigId);
+    if (existingTask) {
+      return existingTask;
+    }
+
+    const task = this.syncFromOdoo(context, posConfigId, request, state)
+      .catch((error) => {
+        if (state) {
+          return {
+            ready: true,
+            refreshed: false,
+            stale: true,
+            sync_state: state,
+            error: error instanceof Error ? error.message : String(error)
+          };
+        }
+        throw error;
+      })
+      .finally(() => {
+        this.syncLocks.delete(posConfigId);
+      });
+    this.syncLocks.set(posConfigId, task);
+    return task;
   }
 
   async products(context: AuthContext, request: CatalogRequest): Promise<Record<string, unknown>> {
     const posConfigId = this.resolvePosConfigId(context, request);
-    let state = await this.repository.syncState(posConfigId);
-    if (!state || request.refresh) {
-      await this.fetchAndStore(context, posConfigId, request);
-      state = await this.repository.syncState(posConfigId);
-      if (!state) {
-        throw badRequest("CATALOG_SYNC_EMPTY", "Catalog sync did not produce warehouse state.");
-      }
+    const state = await this.repository.syncState(posConfigId);
+    const limit = this.clampLimit(request.limit);
+    if (!state) {
+      return {
+        products: emptyPage(request.offset, limit),
+        config: {
+          pos_config_id: posConfigId,
+          warehouse_id: null,
+          warehouse_name: null,
+          last_synced_at: null
+        },
+        sync_state: null,
+        cache: "empty"
+      };
     }
 
     return {
       products: await this.repository.listProducts({
         warehouseId: state.warehouse_odoo_id,
         offset: request.offset,
-        limit: this.clampLimit(request.limit),
+        limit,
         updatedAfter: request.updated_after || request.last_update
       }),
       config: {
@@ -49,33 +92,33 @@ export class ProductCatalogService {
 
   async barcode(context: AuthContext, request: CatalogRequest, barcode: string): Promise<Record<string, unknown>> {
     const posConfigId = this.resolvePosConfigId(context, request);
-    const state = await this.ensureState(context, posConfigId, request);
+    const state = await this.repository.syncState(posConfigId);
+    if (!state) {
+      return { item: null, cache: "empty" };
+    }
+
     const cacheKey = `catalog:barcode:${state.warehouse_odoo_id}:${barcode}`;
     const cached = await this.redis.get(cacheKey);
     if (cached) {
       return { item: JSON.parse(cached), cache: "hit" };
     }
 
-    let product = await this.repository.findByBarcode(state.warehouse_odoo_id, barcode);
-    if (!product) {
-      await this.fetchAndStore(context, posConfigId, { ...request, barcode, limit: 1, offset: 0 });
-      product = await this.repository.findByBarcode(state.warehouse_odoo_id, barcode);
-    }
+    const product = await this.repository.findByBarcode(state.warehouse_odoo_id, barcode);
     if (product) {
       await this.redis.set(cacheKey, JSON.stringify(product), "EX", this.config.cacheTtlSeconds);
     }
-    return { item: product, cache: "miss" };
+    return { item: product, cache: product ? "miss" : "not_found" };
   }
 
   async product(context: AuthContext, request: CatalogRequest, productId: number): Promise<Record<string, unknown>> {
     const posConfigId = this.resolvePosConfigId(context, request);
-    const state = await this.ensureState(context, posConfigId, request);
-    let product = await this.repository.findByOdooId(state.warehouse_odoo_id, productId);
-    if (!product) {
-      await this.fetchAndStore(context, posConfigId, { ...request, product_id: productId, limit: 1, offset: 0 } as CatalogRequest & { product_id: number });
-      product = await this.repository.findByOdooId(state.warehouse_odoo_id, productId);
+    const state = await this.repository.syncState(posConfigId);
+    if (!state) {
+      return { item: null, cache: "empty" };
     }
-    return { item: product };
+    return {
+      item: await this.repository.findByOdooId(state.warehouse_odoo_id, productId)
+    };
   }
 
   async status(posConfigId?: number): Promise<Record<string, unknown>> {
@@ -85,18 +128,12 @@ export class ProductCatalogService {
     return { sync_state: await this.repository.syncState(posConfigId) };
   }
 
-  private async ensureState(context: AuthContext, posConfigId: number, request: CatalogRequest) {
-    const state = await this.repository.syncState(posConfigId);
-    if (state) return state;
-    return this.repository.upsertSnapshot(posConfigId, await this.fetchAndStore(context, posConfigId, request));
-  }
-
   private async fetchAndStore(
     context: AuthContext,
     posConfigId: number,
     request: CatalogRequest & { barcode?: string; product_id?: number }
   ): Promise<Record<string, unknown>> {
-    const snapshot = await fetchOdooCatalog(this.config, context.odoo_access_token, {
+    const snapshot = await this.catalogFetcher(this.config, context.odoo_access_token, {
       pos_config: posConfigId,
       offset: request.offset,
       limit: this.clampLimit(request.limit),
@@ -106,6 +143,50 @@ export class ProductCatalogService {
     });
     await this.repository.upsertSnapshot(posConfigId, snapshot);
     return snapshot;
+  }
+
+  private async syncFromOdoo(
+    context: AuthContext,
+    posConfigId: number,
+    request: CatalogRequest,
+    existingState: Awaited<ReturnType<ProductCatalogRepository["syncState"]>>
+  ): Promise<Record<string, unknown>> {
+    const limit = this.clampLimit(request.limit || this.config.catalogMaxLimit);
+    const updatedAfter = request.updated_after || request.last_update || (request.refresh ? existingState?.last_odoo_write_date || undefined : undefined);
+    let offset = 0;
+    let syncedCount = 0;
+    let total = 0;
+    let pages = 0;
+    let hasMore = true;
+
+    while (hasMore) {
+      const snapshot = await this.fetchAndStore(context, posConfigId, {
+        ...request,
+        offset,
+        limit,
+        updated_after: updatedAfter
+      });
+      pages += 1;
+      const page = pageInfo(snapshot.products);
+      syncedCount += page.items.length;
+      total = page.total || total;
+      hasMore = page.hasMore && page.items.length > 0;
+      offset += page.items.length;
+    }
+
+    const state = await this.repository.syncState(posConfigId);
+    if (!state) {
+      throw badRequest("CATALOG_SYNC_EMPTY", "Catalog sync did not produce warehouse state.");
+    }
+
+    return {
+      ready: true,
+      refreshed: true,
+      sync_state: state,
+      pages,
+      synced_count: syncedCount,
+      total
+    };
   }
 
   private resolvePosConfigId(context: AuthContext, request: CatalogRequest): number {
@@ -119,4 +200,38 @@ export class ProductCatalogService {
   private clampLimit(value: number): number {
     return Math.min(Math.max(value, 1), this.config.catalogMaxLimit);
   }
+}
+
+function emptyPage(offset: number, limit: number): Record<string, unknown> {
+  return {
+    items: [],
+    offset,
+    limit,
+    total: 0,
+    has_more: false
+  };
+}
+
+function pageInfo(source: unknown): { items: Record<string, unknown>[]; total: number; hasMore: boolean } {
+  if (!source || typeof source !== "object" || Array.isArray(source)) {
+    return { items: [], total: 0, hasMore: false };
+  }
+  const page = source as Record<string, unknown>;
+  const items = Array.isArray(page.items)
+    ? page.items.filter((item): item is Record<string, unknown> => Boolean(item) && typeof item === "object" && !Array.isArray(item))
+    : [];
+  return {
+    items,
+    total: toNumber(page.total) || items.length,
+    hasMore: page.has_more === true || page.hasMore === true
+  };
+}
+
+function toNumber(value: unknown): number | null {
+  if (typeof value === "number" && Number.isFinite(value)) return Math.trunc(value);
+  if (typeof value === "string" && value.trim()) {
+    const parsed = Number(value);
+    return Number.isFinite(parsed) ? Math.trunc(parsed) : null;
+  }
+  return null;
 }

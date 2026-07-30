@@ -9,6 +9,7 @@ import { HttpError } from "./errors.js";
 import { connectRedis } from "./redis.js";
 import { MemberRepository } from "./member/repository.js";
 import { registerMemberRoutes } from "./member/routes.js";
+import { MemberSyncWorker } from "./sync-worker.js";
 
 export async function buildApp(config: AppConfig) {
   const app = Fastify({
@@ -23,9 +24,11 @@ export async function buildApp(config: AppConfig) {
   const redis = connectRedis(config);
   await redis.connect();
   const repository = new MemberRepository(mongo.collections);
+  const syncWorker = new MemberSyncWorker(config, repository, redis, app.log);
 
   app.decorate("mongo", mongo);
   app.decorate("memberRedis", redis);
+  app.decorate("memberSyncWorker", syncWorker);
 
   app.get("/health/live", async () => ({ status: "ok" }));
   app.get("/health/ready", async () => {
@@ -35,6 +38,7 @@ export async function buildApp(config: AppConfig) {
   });
 
   registerMemberRoutes(app, config, repository, redis);
+  syncWorker.start();
 
   app.setErrorHandler((error, _request, reply) => {
     if (error instanceof ZodError) {
@@ -63,6 +67,7 @@ export async function buildApp(config: AppConfig) {
   });
 
   app.addHook("onClose", async () => {
+    syncWorker.stop();
     await redis.quit();
     await mongo.client.close();
   });
@@ -74,5 +79,6 @@ declare module "fastify" {
   interface FastifyInstance {
     mongo: MongoResources;
     memberRedis: Redis;
+    memberSyncWorker: MemberSyncWorker;
   }
 }

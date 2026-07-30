@@ -27,6 +27,16 @@ class Settings(BaseSettings):
     internal_service_key: str | None = None
     request_timeout_seconds: float = Field(...)
 
+    sync_worker_enabled: bool = False
+    sync_worker_interval_seconds: float = 60
+    sync_worker_initial_delay_seconds: float = 5
+    sync_worker_retry_min_seconds: float = 30
+    sync_worker_retry_max_seconds: float = 300
+    sync_lookback_minutes: int = 5
+    odoo_sync_username: str | None = None
+    odoo_sync_password: str | None = None
+    odoo_sync_device_code: str = "pos-sync-worker"
+
     @model_validator(mode="after")
     def validate_role_environment(self) -> "Settings":
         if self.service_role == "auth":
