@@ -26,7 +26,7 @@ export class MemberRepository {
   constructor(private readonly collections: MemberCollections) {}
 
   async upsertSnapshot(companyOdooId: number, snapshot: Record<string, unknown>): Promise<void> {
-    const members = extractItems(snapshot.members).map((item) => normalizeMember(item, companyOdooId));
+    const members = extractMemberItems(snapshot).map((item) => normalizeMember(item, companyOdooId));
     const tiers = extractArray(snapshot.tiers).map((item) => normalizeTier(item, companyOdooId));
     const loyaltyPrograms = extractArray(snapshot.loyalty_programs).map((item) => normalizeLoyaltyProgram(item, companyOdooId));
 
@@ -186,6 +186,10 @@ export function extractItems(source: unknown): Record<string, unknown>[] {
   const items = (source as Record<string, unknown>).items;
   if (!Array.isArray(items)) return [];
   return items.filter(isRecord);
+}
+
+export function extractMemberItems(snapshot: Record<string, unknown>): Record<string, unknown>[] {
+  return extractItems(snapshot.members ?? snapshot.partners);
 }
 
 export function extractArray(source: unknown): Record<string, unknown>[] {

@@ -28,6 +28,9 @@ export type MemberTierDocument = {
   company_odoo_id: number;
   name: string;
   code: string | null;
+  color: string | null;
+  point_from: number | null;
+  point_to: number | null;
   sequence: number | null;
   active: boolean;
   write_date: string | null;
@@ -40,6 +43,7 @@ export type LoyaltyProgramDocument = {
   name: string;
   pos_loyalty_type: string | null;
   expired_days: number | null;
+  warehouse_ids: number[];
   active: boolean;
   write_date: string | null;
   raw: Record<string, unknown>;
@@ -124,6 +128,9 @@ export function normalizeTier(input: Record<string, unknown>, companyOdooId: num
     company_odoo_id: toNumber(input.company_id) || companyOdooId,
     name: toStringOrNull(input.name) || `Tier ${id}`,
     code: toStringOrNull(input.code) || toStringOrNull(input.member_type),
+    color: toStringOrNull(input.color),
+    point_from: toNumber(input.point_from),
+    point_to: toNumber(input.point_to),
     sequence: toNumber(input.sequence),
     active: toBoolean(input.active, true),
     write_date: toStringOrNull(input.write_date),
@@ -136,6 +143,9 @@ export function tierToApi(document: MemberTierDocument): Record<string, unknown>
     id: document.odoo_id,
     name: document.name,
     code: document.code,
+    color: document.color,
+    point_from: document.point_from,
+    point_to: document.point_to,
     sequence: document.sequence,
     active: document.active,
     company_id: document.company_odoo_id,
@@ -154,6 +164,7 @@ export function normalizeLoyaltyProgram(input: Record<string, unknown>, companyO
     name: toStringOrNull(input.name) || `Loyalty Program ${id}`,
     pos_loyalty_type: toStringOrNull(input.pos_loyalty_type),
     expired_days: toNumber(input.expired_days),
+    warehouse_ids: toNumberArray(input.warehouse_ids),
     active: toBoolean(input.active, true),
     write_date: toStringOrNull(input.write_date),
     raw: input
@@ -166,6 +177,7 @@ export function loyaltyProgramToApi(document: LoyaltyProgramDocument): Record<st
     name: document.name,
     pos_loyalty_type: document.pos_loyalty_type,
     expired_days: document.expired_days,
+    warehouse_ids: document.warehouse_ids,
     active: document.active,
     company_id: document.company_odoo_id,
     write_date: document.write_date
@@ -225,6 +237,13 @@ export function digitsOnly(value: string | null): string | null {
   if (!value) return null;
   const digits = value.replace(/\D/g, "");
   return digits || null;
+}
+
+function toNumberArray(value: unknown): number[] {
+  if (!Array.isArray(value)) return [];
+  return value
+    .map((item) => toNumber(item))
+    .filter((item): item is number => item !== null);
 }
 
 function many2One(value: unknown): { id: number; name: string | null } | null {
