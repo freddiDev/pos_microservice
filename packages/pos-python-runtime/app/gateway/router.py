@@ -1,3 +1,4 @@
+import httpx
 from fastapi import FastAPI, HTTPException, Request
 from starlette.responses import Response
 
@@ -70,12 +71,18 @@ def include_gateway_routes(app: FastAPI) -> None:
         headers["x-forwarded-host"] = request.headers.get("host", "")
         headers["x-forwarded-proto"] = request.url.scheme
 
-        upstream_response = await request.app.state.gateway_http.request(
-            request.method,
-            target,
-            content=await request.body(),
-            headers=headers,
-        )
+        try:
+            upstream_response = await request.app.state.gateway_http.request(
+                request.method,
+                target,
+                content=await request.body(),
+                headers=headers,
+            )
+        except httpx.HTTPError as exc:
+            raise HTTPException(
+                status_code=502,
+                detail=f"Gateway upstream request failed: {exc}",
+            ) from exc
         response_headers = {
             key: value
             for key, value in upstream_response.headers.items()
