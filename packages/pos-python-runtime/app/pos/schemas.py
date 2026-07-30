@@ -34,6 +34,7 @@ class PosCashierOut(BaseModel):
     login: str | None = None
     avatar: str | None = None
     has_pos_pin: bool = False
+    pos_pin_hash: str | None = None
 
 
 class PosConfigOut(BaseModel):

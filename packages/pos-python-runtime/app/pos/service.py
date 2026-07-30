@@ -1,3 +1,4 @@
+import hashlib
 from decimal import Decimal
 from typing import Any
 
@@ -348,14 +349,26 @@ def _payment_out(item: dict[str, Any]) -> PosPaymentMethodOut:
 
 def _cashier_out(item: dict[str, Any]) -> PosCashierOut:
     user_id = int(item.get("odoo_user_id") or item.get("id"))
+    pin_hash = _cashier_pin_hash(user_id, item)
     return PosCashierOut(
         id=user_id,
         odoo_user_id=user_id,
         name=item.get("name") or f"Cashier {user_id}",
         login=_none_false(item.get("login")),
         avatar=_none_false(item.get("avatar")),
-        has_pos_pin=bool(item.get("has_pos_pin")),
+        has_pos_pin=bool(item.get("has_pos_pin")) or pin_hash is not None,
+        pos_pin_hash=pin_hash,
     )
+
+
+def _cashier_pin_hash(user_id: int, item: dict[str, Any]) -> str | None:
+    provided_hash = _none_false(item.get("pos_pin_hash"))
+    if provided_hash:
+        return provided_hash
+    pin = _none_false(item.get("pos_pin"))
+    if not pin:
+        return None
+    return hashlib.sha256(f"{user_id}:{pin}".encode("utf-8")).hexdigest()
 
 
 def _session_out(row: models.PosSession) -> PosSessionOut:

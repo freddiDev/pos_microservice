@@ -19,6 +19,7 @@ class PosConfigRepository:
         return await session.scalar(select(models.PosConfig).where(models.PosConfig.odoo_config_id == odoo_config_id))
 
     async def upsert_config(self, session: AsyncSession, payload: dict[str, Any]) -> models.PosConfig:
+        payload = _sanitize_config_payload(payload)
         odoo_config_id = int(payload["odoo_config_id"])
         config = await self.get_by_odoo_id(session, odoo_config_id)
         values = {
@@ -258,6 +259,28 @@ class IdempotencyRepository:
 
 def hash_request(body: dict[str, Any]) -> str:
     return hashlib.sha256(json.dumps(body, sort_keys=True, separators=(",", ":"), default=str).encode("utf-8")).hexdigest()
+
+
+def _sanitize_config_payload(payload: dict[str, Any]) -> dict[str, Any]:
+    sanitized = dict(payload)
+    cashiers = sanitized.get("cashiers")
+    if not isinstance(cashiers, list):
+        return sanitized
+
+    sanitized_cashiers: list[dict[str, Any]] = []
+    for item in cashiers:
+        if not isinstance(item, dict):
+            continue
+        cashier = dict(item)
+        user_id = _int_or_none(cashier.get("odoo_user_id") or cashier.get("id"))
+        pin = _none_false(cashier.pop("pos_pin", None))
+        if user_id is not None and pin:
+            cashier["pos_pin_hash"] = hashlib.sha256(f"{user_id}:{pin}".encode("utf-8")).hexdigest()
+            cashier["has_pos_pin"] = True
+        sanitized_cashiers.append(cashier)
+
+    sanitized["cashiers"] = sanitized_cashiers
+    return sanitized
 
 
 def _none_false(value: Any) -> str | None:
