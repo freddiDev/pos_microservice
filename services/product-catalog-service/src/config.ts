@@ -6,8 +6,8 @@ const envSchema = z.object({
   PRODUCT_SERVICE_HOST: z.string().default("0.0.0.0"),
   PRODUCT_SERVICE_PORT: z.coerce.number().int().min(1).max(65535).default(3000),
   REQUEST_TIMEOUT_SECONDS: z.coerce.number().positive().default(10),
-  AUTH_SERVICE_URL: z.string().url(),
-  ODOO_BASE_URL: z.string().url(),
+  AUTH_SERVICE_URL: z.string().trim().url(),
+  ODOO_BASE_URL: z.string().trim().url(),
   INTERNAL_SERVICE_KEY: z.string().min(1),
   CATALOG_MONGO_URL: z.string().min(1),
   CATALOG_MONGO_DB: z.string().min(1).default("pos_catalog_db"),
@@ -94,7 +94,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
 }
 
 function trimTrailingSlash(value: string): string {
-  return value.replace(/\/+$/, "");
+  return value.trim().replace(/\/+$/, "");
 }
 
 function normalizePrefix(value: string): string {

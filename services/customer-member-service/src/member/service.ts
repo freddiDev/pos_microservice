@@ -175,7 +175,10 @@ export class CustomerMemberService {
       const page = pageInfo(snapshot.members ?? snapshot.partners);
       syncedCount += page.items.length;
       total = page.total || total;
-      hasMore = page.hasMore && page.items.length > 0;
+      if (syncedCount < total && page.items.length === 0) {
+        throw new Error("Odoo returned an empty member page before total was reached.");
+      }
+      hasMore = syncedCount < total;
       offset += page.items.length;
     }
 
@@ -209,15 +212,19 @@ function cacheKey(companyId: number): string {
 
 function pageInfo(source: unknown): { items: Record<string, unknown>[]; total: number; hasMore: boolean } {
   if (!source || typeof source !== "object" || Array.isArray(source)) {
-    return { items: [], total: 0, hasMore: false };
+    throw new Error("Odoo member response did not contain a pagination page.");
   }
   const page = source as Record<string, unknown>;
   const items = Array.isArray(page.items)
     ? page.items.filter((item): item is Record<string, unknown> => Boolean(item) && typeof item === "object" && !Array.isArray(item))
     : [];
+  const total = toNumber(page.total);
+  if (total === null || total < 0) {
+    throw new Error("Odoo member response did not contain a valid total.");
+  }
   return {
     items,
-    total: toNumber(page.total) || items.length,
+    total,
     hasMore: page.has_more === true || page.hasMore === true
   };
 }

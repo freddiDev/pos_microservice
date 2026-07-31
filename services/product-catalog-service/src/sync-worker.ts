@@ -121,6 +121,7 @@ export class CatalogSyncWorker {
       this.logger.info(result, "Catalog sync worker completed.");
       this.schedule(this.config.syncWorkerIntervalMs);
     } catch (error) {
+      this.session = null;
       const message = errorMessage(error);
       this.setStatus({
         running: false,
@@ -221,10 +222,10 @@ export class CatalogSyncWorker {
         syncedCount += page.items.length;
         imageSyncedCount += imageResult.synced;
         imageFailedCount += imageResult.failed;
-        if (page.hasMore && page.items.length === 0) {
-          throw new Error("Odoo returned an empty product page while has_more=true.");
+        if (syncedCount < sourceTotal && page.items.length === 0) {
+          throw new Error("Odoo returned an empty product page before source_total was reached.");
         }
-        hasMore = page.hasMore && page.items.length > 0;
+        hasMore = syncedCount < sourceTotal;
         offset += page.items.length;
       }
 
@@ -358,7 +359,7 @@ async function loginToOdoo(config: AppConfig): Promise<OdooSyncSession> {
   }
   return {
     accessToken,
-    expiresAt: dateValue(response.expires_at)
+    expiresAt: expiryFromResponse(response)
   };
 }
 
@@ -428,15 +429,19 @@ function unwrapEnvelope(body: unknown): Record<string, unknown> | undefined {
 
 function pageInfo(source: unknown): { items: Record<string, unknown>[]; total: number; hasMore: boolean } {
   if (!source || typeof source !== "object" || Array.isArray(source)) {
-    return { items: [], total: 0, hasMore: false };
+    throw new Error("Odoo catalog response did not contain a pagination page.");
   }
   const page = source as Record<string, unknown>;
   const items = Array.isArray(page.items)
     ? page.items.filter((item): item is Record<string, unknown> => Boolean(item) && typeof item === "object" && !Array.isArray(item))
     : [];
+  const total = toNumber(page.total);
+  if (total === null || total < 0) {
+    throw new Error("Odoo catalog response did not contain a valid total.");
+  }
   return {
     items,
-    total: toNumber(page.total) || items.length,
+    total,
     hasMore: page.has_more === true || page.hasMore === true
   };
 }
@@ -466,10 +471,10 @@ async function mapWithConcurrency<T, R>(items: T[], concurrency: number, mapper:
 }
 
 function toNumber(value: unknown): number | null {
-  if (typeof value === "number" && Number.isInteger(value) && value > 0) return value;
+  if (typeof value === "number" && Number.isInteger(value) && value >= 0) return value;
   if (typeof value === "string" && value.trim()) {
     const parsed = Number(value);
-    return Number.isInteger(parsed) && parsed > 0 ? parsed : null;
+    return Number.isInteger(parsed) && parsed >= 0 ? parsed : null;
   }
   return null;
 }
@@ -485,6 +490,15 @@ function dateValue(value: unknown): Date | null {
   if (!text) return null;
   const parsed = new Date(text.replace(" ", "T"));
   return Number.isNaN(parsed.getTime()) ? null : parsed;
+}
+
+function expiryFromResponse(response: Record<string, unknown>): Date | null {
+  const explicit = dateValue(response.expires_at);
+  if (explicit) return explicit;
+  const expiresIn = toNumber(response.expires_in);
+  return expiresIn === null || expiresIn <= 0
+    ? null
+    : new Date(Date.now() + expiresIn * 1000);
 }
 
 function errorMessage(error: unknown): string {
