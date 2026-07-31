@@ -108,6 +108,7 @@ services:
     container_name: pos-ms-product
     environment:
       <<: *sync_env
+      ODOO_SYNC_DEVICE_CODE: ${ODOO_CATALOG_SYNC_DEVICE_CODE:-product-catalog-sync-worker}
       NODE_ENV: ${ENVIRONMENT:?ENVIRONMENT is required}
       API_PREFIX: ${API_PREFIX:?API_PREFIX is required}
       PRODUCT_SERVICE_HOST: ${PRODUCT_SERVICE_HOST:?PRODUCT_SERVICE_HOST is required}
@@ -145,6 +146,7 @@ services:
     container_name: pos-ms-member
     environment:
       <<: *sync_env
+      ODOO_SYNC_DEVICE_CODE: ${ODOO_MEMBER_SYNC_DEVICE_CODE:-customer-member-sync-worker}
       NODE_ENV: ${ENVIRONMENT:?ENVIRONMENT is required}
       API_PREFIX: ${API_PREFIX:?API_PREFIX is required}
       MEMBER_SERVICE_HOST: ${MEMBER_SERVICE_HOST:?MEMBER_SERVICE_HOST is required}
