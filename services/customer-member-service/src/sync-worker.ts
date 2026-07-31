@@ -1,4 +1,5 @@
 import type { Redis } from "ioredis";
+import { randomUUID } from "node:crypto";
 
 import type { AppConfig } from "./config.js";
 import { fetchOdooMembers } from "./odoo-client.js";
@@ -143,33 +144,60 @@ export class MemberSyncWorker {
       return { locked: true, members_synced: 0 };
     }
 
+    const snapshotId = `${new Date().toISOString()}-${randomUUID()}`;
     try {
-      const state = await this.repository.syncState(session.companyOdooId);
-      const updatedAfter = subtractMinutes(state?.last_odoo_write_date, this.config.syncLookbackMinutes);
+      await this.repository.beginSnapshot(session.companyOdooId, snapshotId);
       let offset = 0;
       let syncedCount = 0;
+      let sourceTotal = 0;
+      let latestWriteDate: string | null = null;
+      let firstSnapshot: Record<string, unknown> | null = null;
       let hasMore = true;
 
       while (hasMore) {
         const snapshot = await fetchOdooMembers(this.config, session.accessToken, {
           offset,
           limit: this.config.memberMaxLimit,
-          updated_after: updatedAfter,
-          include_inactive: true
+          include_inactive: false
         });
-        await this.repository.upsertSnapshot(session.companyOdooId, snapshot);
-        await this.redis.del(`members:company:${session.companyOdooId}:state`);
+        firstSnapshot ??= snapshot;
 
         const page = pageInfo(snapshot.members ?? snapshot.partners);
+        if (sourceTotal === 0) sourceTotal = page.total;
+        if (page.total !== sourceTotal) {
+          throw new Error(`Member source total changed during sync: ${sourceTotal} -> ${page.total}.`);
+        }
+        const written = await this.repository.writeSnapshotPage(session.companyOdooId, snapshotId, snapshot);
+        latestWriteDate = maxWriteDate(latestWriteDate, written.latestWriteDate);
         syncedCount += page.items.length;
+        if (page.hasMore && page.items.length === 0) {
+          throw new Error("Odoo returned an empty member page while has_more=true.");
+        }
         hasMore = page.hasMore && page.items.length > 0;
         offset += page.items.length;
       }
 
+      await this.repository.replaceAuxiliaryData(session.companyOdooId, firstSnapshot ?? {});
+      const state = await this.repository.commitSnapshot(
+        session.companyOdooId,
+        snapshotId,
+        sourceTotal,
+        latestWriteDate
+      );
+      void this.repository.pruneSnapshots(session.companyOdooId, snapshotId);
+
       return {
         company_id: session.companyOdooId,
-        members_synced: syncedCount
+        snapshot_id: snapshotId,
+        members_synced: syncedCount,
+        source_total: sourceTotal,
+        service_total: state.member_count,
+        source_scope: "res.partner:is_membership=true,active=true,company=current_or_shared",
+        snapshot_replaced: true
       };
+    } catch (error) {
+      await this.repository.markSnapshotFailed(session.companyOdooId, snapshotId, errorMessage(error));
+      throw error;
     } finally {
       if ((await this.redis.get(lockKey)) === this.workerId) {
         await this.redis.del(lockKey);
@@ -280,9 +308,9 @@ function unwrapEnvelope(body: unknown): Record<string, unknown> | undefined {
   return record;
 }
 
-function pageInfo(source: unknown): { items: Record<string, unknown>[]; hasMore: boolean } {
+function pageInfo(source: unknown): { items: Record<string, unknown>[]; total: number; hasMore: boolean } {
   if (!source || typeof source !== "object" || Array.isArray(source)) {
-    return { items: [], hasMore: false };
+    return { items: [], total: 0, hasMore: false };
   }
   const page = source as Record<string, unknown>;
   const items = Array.isArray(page.items)
@@ -290,17 +318,15 @@ function pageInfo(source: unknown): { items: Record<string, unknown>[]; hasMore:
     : [];
   return {
     items,
+    total: toNumber(page.total) || items.length,
     hasMore: page.has_more === true || page.hasMore === true
   };
 }
 
-function subtractMinutes(value: string | null | undefined, minutes: number): string | undefined {
-  if (!value) return undefined;
-  if (minutes <= 0) return value;
-  const parsed = new Date(`${value.replace(" ", "T").replace(/Z$/, "")}Z`);
-  if (Number.isNaN(parsed.getTime())) return value;
-  parsed.setMinutes(parsed.getMinutes() - minutes);
-  return parsed.toISOString().slice(0, 19).replace("T", " ");
+function maxWriteDate(current: string | null, candidate: string | null): string | null {
+  if (!current) return candidate;
+  if (!candidate) return current;
+  return candidate > current ? candidate : current;
 }
 
 function toNumber(value: unknown): number | null {

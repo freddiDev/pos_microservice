@@ -68,8 +68,9 @@ export class ProductCatalogService {
     const state = await this.repository.syncState(posConfigId);
     const limit = this.clampLimit(request.limit);
     if (!state) {
+      const products = emptyPage(request.offset, limit, null, "running");
       return {
-        products: emptyPage(request.offset, limit),
+        products,
         config: {
           pos_config_id: posConfigId,
           warehouse_id: null,
@@ -77,23 +78,36 @@ export class ProductCatalogService {
           last_synced_at: null
         },
         sync_state: null,
+        snapshot_id: null,
+        sync_status: "running",
         cache: "empty"
       };
     }
 
+    const snapshotId = state.active_snapshot_id || null;
+    const syncStatus = state.sync_status || (state.last_synced_at ? "complete" : "running");
+    const page = await this.repository.listProducts({
+      posConfigId,
+      warehouseId: state.warehouse_odoo_id,
+      offset: request.offset,
+      limit,
+      updatedAfter: request.updated_after || request.last_update
+    });
     return {
-      products: await this.repository.listProducts({
-        warehouseId: state.warehouse_odoo_id,
-        offset: request.offset,
-        limit,
-        updatedAfter: request.updated_after || request.last_update
-      }),
+      products: {
+        ...page,
+        snapshot_id: snapshotId,
+        sync_status: syncStatus
+      },
       config: {
         pos_config_id: posConfigId,
         warehouse_id: state.warehouse_odoo_id,
         warehouse_name: state.warehouse_name,
-        last_synced_at: state.last_synced_at.toISOString()
-      }
+        last_synced_at: state.last_synced_at?.toISOString?.() || null
+      },
+      sync_state: state,
+      snapshot_id: snapshotId,
+      sync_status: syncStatus
     };
   }
 
@@ -104,13 +118,13 @@ export class ProductCatalogService {
       return { item: null, cache: "empty" };
     }
 
-    const cacheKey = `catalog:barcode:${state.warehouse_odoo_id}:${barcode}`;
+    const cacheKey = `catalog:barcode:${posConfigId}:${state.active_snapshot_id || "legacy"}:${barcode}`;
     const cached = await this.redis.get(cacheKey);
     if (cached) {
       return { item: JSON.parse(cached), cache: "hit" };
     }
 
-    const product = await this.repository.findByBarcode(state.warehouse_odoo_id, barcode);
+    const product = await this.repository.findByBarcode(posConfigId, state.warehouse_odoo_id, barcode);
     if (product) {
       await this.redis.set(cacheKey, JSON.stringify(product), "EX", this.config.cacheTtlSeconds);
     }
@@ -124,7 +138,7 @@ export class ProductCatalogService {
       return { item: null, cache: "empty" };
     }
     return {
-      item: await this.repository.findByOdooId(state.warehouse_odoo_id, productId)
+      item: await this.repository.findByOdooId(posConfigId, state.warehouse_odoo_id, productId)
     };
   }
 
@@ -242,13 +256,20 @@ function imageDataBuffer(value: unknown): Buffer {
   return Buffer.alloc(0);
 }
 
-function emptyPage(offset: number, limit: number): Record<string, unknown> {
+function emptyPage(
+  offset: number,
+  limit: number,
+  snapshotId: string | null = null,
+  syncStatus: string | null = null
+): Record<string, unknown> {
   return {
     items: [],
     offset,
     limit,
     total: 0,
-    has_more: false
+    has_more: false,
+    snapshot_id: snapshotId,
+    sync_status: syncStatus
   };
 }
 

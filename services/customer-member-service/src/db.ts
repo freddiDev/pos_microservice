@@ -4,12 +4,14 @@ import { AppConfig } from "./config.js";
 import {
   LoyaltyProgramDocument,
   MemberDocument,
+  MemberSnapshotDocument,
   MemberSyncStateDocument,
   MemberTierDocument
 } from "./member/normalizers.js";
 
 export type MemberCollections = {
   members: Collection<MemberDocument>;
+  memberSnapshots: Collection<MemberSnapshotDocument>;
   tiers: Collection<MemberTierDocument>;
   loyaltyPrograms: Collection<LoyaltyProgramDocument>;
   syncState: Collection<MemberSyncStateDocument>;
@@ -31,6 +33,7 @@ export async function connectMongo(config: AppConfig): Promise<MongoResources> {
   const db = client.db(config.mongoDbName);
   const collections = {
     members: db.collection<MemberDocument>("member_customers"),
+    memberSnapshots: db.collection<MemberSnapshotDocument>("member_customer_snapshots"),
     tiers: db.collection<MemberTierDocument>("member_tiers"),
     loyaltyPrograms: db.collection<LoyaltyProgramDocument>("member_loyalty_programs"),
     syncState: db.collection<MemberSyncStateDocument>("member_sync_state")
@@ -44,6 +47,22 @@ export async function ensureIndexes(collections: MemberCollections): Promise<voi
     collections.members.createIndex(
       { company_odoo_id: 1, odoo_partner_id: 1 },
       { unique: true, name: "uniq_member_company_partner" }
+    ),
+    collections.memberSnapshots.createIndex(
+      { snapshot_id: 1, company_odoo_id: 1, odoo_partner_id: 1 },
+      { unique: true, name: "uniq_member_snapshot_partner" }
+    ),
+    collections.memberSnapshots.createIndex(
+      { snapshot_id: 1, company_odoo_id: 1, active: 1, is_membership: 1, write_date: 1, odoo_partner_id: 1 },
+      { name: "idx_member_snapshot_list" }
+    ),
+    collections.memberSnapshots.createIndex(
+      { snapshot_id: 1, company_odoo_id: 1, name_search: 1 },
+      { name: "idx_member_snapshot_name" }
+    ),
+    collections.memberSnapshots.createIndex(
+      { snapshot_id: 1, company_odoo_id: 1, member_code_search: 1 },
+      { name: "idx_member_snapshot_code" }
     ),
     collections.members.createIndex({ company_odoo_id: 1, active: 1, write_date: 1, odoo_partner_id: 1 }, { name: "idx_member_active_write" }),
     collections.members.createIndex({ company_odoo_id: 1, name_search: 1 }, { name: "idx_member_name_search" }),

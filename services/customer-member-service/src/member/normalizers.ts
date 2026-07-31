@@ -23,6 +23,10 @@ export type MemberDocument = {
   raw: Record<string, unknown>;
 };
 
+export type MemberSnapshotDocument = MemberDocument & {
+  snapshot_id: string;
+};
+
 export type MemberTierDocument = {
   odoo_id: number;
   company_odoo_id: number;
@@ -54,6 +58,13 @@ export type MemberSyncStateDocument = {
   member_count: number;
   last_synced_at: Date;
   last_odoo_write_date: string | null;
+  active_snapshot_id?: string | null;
+  sync_status?: "running" | "complete" | "failed";
+  source_total?: number;
+  last_run_id?: string | null;
+  last_run_started_at?: Date | null;
+  last_run_completed_at?: Date | null;
+  last_error?: string | null;
 };
 
 export function normalizeMember(input: Record<string, unknown>, companyOdooId: number): MemberDocument {

@@ -1,9 +1,17 @@
 import { Filter } from "mongodb";
 
 import { CatalogCollections } from "../db.js";
-import { normalizeProduct, ProductDocument, ProductImageDocument, productToApi, SyncStateDocument, toNumber } from "./normalizers.js";
+import {
+  normalizeProduct,
+  ProductDocument,
+  ProductImageDocument,
+  productToApi,
+  SyncStateDocument,
+  toNumber
+} from "./normalizers.js";
 
 export type ProductListOptions = {
+  posConfigId?: number;
   warehouseId: number;
   offset: number;
   limit: number;
@@ -15,6 +23,125 @@ export class ProductCatalogRepository {
     private readonly collections: CatalogCollections,
     private readonly apiPrefix = "/api/v1"
   ) {}
+
+  async beginSnapshot(posConfigId: number, snapshotId: string, startedAt = new Date()): Promise<void> {
+    await this.collections.productSnapshots.deleteMany({ snapshot_id: snapshotId, pos_config_odoo_id: posConfigId });
+    await this.collections.syncState.updateOne(
+      { pos_config_odoo_id: posConfigId },
+      {
+        $set: {
+          pos_config_odoo_id: posConfigId,
+          sync_status: "running",
+          last_run_id: snapshotId,
+          last_run_started_at: startedAt,
+          last_error: null
+        }
+      },
+      { upsert: true }
+    );
+  }
+
+  async writeSnapshotPage(
+    posConfigId: number,
+    snapshotId: string,
+    snapshot: Record<string, unknown>
+  ): Promise<{ products: number; latestWriteDate: string | null }> {
+    const products = extractItems(snapshot.products).map((item) => ({
+      ...normalizeProduct(item),
+      snapshot_id: snapshotId,
+      pos_config_odoo_id: posConfigId
+    }));
+    if (products.length) {
+      await this.collections.productSnapshots.bulkWrite(
+        products.map((product) => ({
+          updateOne: {
+            filter: {
+              snapshot_id: snapshotId,
+              pos_config_odoo_id: posConfigId,
+              odoo_product_id: product.odoo_product_id,
+              warehouse_odoo_id: product.warehouse_odoo_id
+            },
+            update: { $set: product },
+            upsert: true
+          }
+        })),
+        { ordered: false }
+      );
+    }
+
+    await Promise.all([
+      this.upsertSimpleCollection(this.collections.categories, snapshot.categories, "odoo_id"),
+      this.upsertSimpleCollection(this.collections.uoms, snapshot.uoms, "odoo_id"),
+      this.upsertSimpleCollection(this.collections.taxes, snapshot.taxes, "odoo_id"),
+      this.upsertSimpleCollection(this.collections.categoryCv, snapshot.category_cv, "id"),
+      this.upsertSimpleCollection(this.collections.productCvs, snapshot.product_cvs, "id"),
+      this.upsertSimpleCollection(this.collections.productTemplateCv, snapshot.product_template_cv, "id")
+    ]);
+
+    return {
+      products: products.length,
+      latestWriteDate: latestWriteDate(products)
+    };
+  }
+
+  async commitSnapshot(
+    posConfigId: number,
+    snapshotId: string,
+    firstSnapshot: Record<string, unknown>,
+    sourceTotal: number,
+    latestWriteDate: string | null,
+    completedAt = new Date()
+  ): Promise<SyncStateDocument> {
+    const stagedProducts = await this.collections.productSnapshots.countDocuments({
+      snapshot_id: snapshotId,
+      pos_config_odoo_id: posConfigId
+    });
+    if (stagedProducts !== sourceTotal) {
+      throw new Error(`Product snapshot validation failed: source=${sourceTotal}, staged=${stagedProducts}.`);
+    }
+
+    const firstProducts = extractItems(firstSnapshot.products).map(normalizeProduct);
+    const warehouseId = resolveWarehouseId(firstSnapshot, firstProducts);
+    const warehouseName = resolveWarehouseName(firstSnapshot, firstProducts);
+    const previous = await this.syncState(posConfigId);
+    const state: SyncStateDocument = {
+      pos_config_odoo_id: posConfigId,
+      warehouse_odoo_id: warehouseId,
+      warehouse_name: warehouseName,
+      product_count: stagedProducts,
+      last_synced_at: completedAt,
+      last_odoo_write_date: latestWriteDate || previous?.last_odoo_write_date || null,
+      active_snapshot_id: snapshotId,
+      sync_status: "complete",
+      source_total: sourceTotal,
+      last_run_id: snapshotId,
+      last_run_started_at: previous?.last_run_started_at || null,
+      last_run_completed_at: completedAt,
+      last_error: null
+    };
+    await this.collections.syncState.updateOne(
+      { pos_config_odoo_id: posConfigId },
+      { $set: state },
+      { upsert: true }
+    );
+    return state;
+  }
+
+  async markSnapshotFailed(posConfigId: number, snapshotId: string, error: string): Promise<void> {
+    await this.collections.syncState.updateOne(
+      { pos_config_odoo_id: posConfigId },
+      { $set: { sync_status: "failed", last_run_id: snapshotId, last_error: error } },
+      { upsert: true }
+    );
+    await this.collections.productSnapshots.deleteMany({ snapshot_id: snapshotId, pos_config_odoo_id: posConfigId });
+  }
+
+  async pruneSnapshots(posConfigId: number, activeSnapshotId: string): Promise<void> {
+    await this.collections.productSnapshots.deleteMany({
+      pos_config_odoo_id: posConfigId,
+      snapshot_id: { $ne: activeSnapshotId }
+    });
+  }
 
   async upsertSnapshot(posConfigId: number, snapshot: Record<string, unknown>): Promise<SyncStateDocument> {
     const productItems = extractItems(snapshot.products);
@@ -60,19 +187,28 @@ export class ProductCatalogRepository {
   }
 
   async listProducts(options: ProductListOptions): Promise<Record<string, unknown>> {
+    const state = options.posConfigId
+      ? await this.syncState(options.posConfigId)
+      : await this.syncStateByWarehouse(options.warehouseId);
+    const snapshotId = state?.active_snapshot_id || null;
+    if (state?.sync_status === "running" && !snapshotId) {
+      return emptyProductPage(options.offset, options.limit);
+    }
+    const collection = snapshotId ? this.collections.productSnapshots : this.collections.products;
     const filter: Filter<ProductDocument> = { warehouse_odoo_id: options.warehouseId };
+    if (snapshotId) Object.assign(filter, { snapshot_id: snapshotId });
     if (options.updatedAfter) {
       filter.write_date = { $gt: options.updatedAfter };
     }
 
     const [items, total] = await Promise.all([
-      this.collections.products
+      collection
         .find(filter, { projection: { _id: 0, raw: 0 } })
         .sort({ write_date: 1, odoo_product_id: 1 })
         .skip(options.offset)
         .limit(options.limit)
         .toArray(),
-      this.collections.products.countDocuments(filter)
+      collection.countDocuments(filter)
     ]);
 
     return {
@@ -84,17 +220,34 @@ export class ProductCatalogRepository {
     };
   }
 
-  async findByBarcode(warehouseId: number, barcode: string): Promise<Record<string, unknown> | null> {
-    const document = await this.collections.products.findOne(
-      { warehouse_odoo_id: warehouseId, barcode },
+  async findByBarcode(posConfigId: number, warehouseId: number, barcode: string): Promise<Record<string, unknown> | null> {
+    const state = await this.syncState(posConfigId);
+    if (state?.sync_status === "running" && !state.active_snapshot_id) return null;
+    const collection = state?.active_snapshot_id ? this.collections.productSnapshots : this.collections.products;
+    const filter: Filter<ProductDocument> = { warehouse_odoo_id: warehouseId, barcode };
+    if (state?.active_snapshot_id) {
+      Object.assign(filter, { snapshot_id: state.active_snapshot_id });
+    }
+    const document = await collection.findOne(
+      filter,
       { projection: { _id: 0, raw: 0 } }
     );
     return document ? productToApi(document, this.apiPrefix) : null;
   }
 
-  async findByOdooId(warehouseId: number, productId: number): Promise<Record<string, unknown> | null> {
-    const document = await this.collections.products.findOne(
-      { warehouse_odoo_id: warehouseId, odoo_product_id: productId },
+  async findByOdooId(posConfigId: number, warehouseId: number, productId: number): Promise<Record<string, unknown> | null> {
+    const state = await this.syncState(posConfigId);
+    if (state?.sync_status === "running" && !state.active_snapshot_id) return null;
+    const collection = state?.active_snapshot_id ? this.collections.productSnapshots : this.collections.products;
+    const filter: Filter<ProductDocument> = {
+      warehouse_odoo_id: warehouseId,
+      odoo_product_id: productId
+    };
+    if (state?.active_snapshot_id) {
+      Object.assign(filter, { snapshot_id: state.active_snapshot_id });
+    }
+    const document = await collection.findOne(
+      filter,
       { projection: { _id: 0, raw: 0 } }
     );
     return document ? productToApi(document, this.apiPrefix) : null;
@@ -124,7 +277,7 @@ export class ProductCatalogRepository {
     });
   }
 
-  async upsertProductImages(images: ProductImageDocument[]): Promise<void> {
+  async upsertProductImages(images: ProductImageDocument[], snapshotId?: string, posConfigId?: number): Promise<void> {
     if (!images.length) return;
     await Promise.all([
       this.collections.productImages.bulkWrite(
@@ -140,7 +293,29 @@ export class ProductCatalogRepository {
         })),
         { ordered: false }
       ),
-      this.collections.products.bulkWrite(
+      snapshotId && posConfigId
+        ? this.collections.productSnapshots.bulkWrite(
+            images.map((image) => ({
+              updateOne: {
+                filter: {
+                  snapshot_id: snapshotId,
+                  pos_config_odoo_id: posConfigId,
+                  odoo_product_id: image.odoo_product_id,
+                  warehouse_odoo_id: image.warehouse_odoo_id
+                },
+                update: {
+                  $set: {
+                    has_image: true,
+                    image_hash: image.checksum,
+                    image_content_type: image.content_type,
+                    image_synced_at: image.synced_at
+                  }
+                }
+              }
+            })),
+            { ordered: false }
+          )
+        : this.collections.products.bulkWrite(
         images.map((image) => ({
           updateOne: {
             filter: {
@@ -183,6 +358,13 @@ export class ProductCatalogRepository {
         }
       })),
       { ordered: false }
+    );
+  }
+
+  private async syncStateByWarehouse(warehouseId: number): Promise<SyncStateDocument | null> {
+    return this.collections.syncState.findOne(
+      { warehouse_odoo_id: warehouseId },
+      { projection: { _id: 0 } }
     );
   }
 
@@ -268,6 +450,10 @@ function resolveWarehouseName(snapshot: Record<string, unknown>, products: Produ
     if (typeof value === "string" && value.trim()) return value.trim();
   }
   return products[0]?.warehouse_name || null;
+}
+
+function emptyProductPage(offset: number, limit: number): Record<string, unknown> {
+  return { items: [], offset, limit, total: 0, has_more: false };
 }
 
 function latestWriteDate(products: ProductDocument[]): string | null {

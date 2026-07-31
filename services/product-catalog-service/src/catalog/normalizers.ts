@@ -21,6 +21,11 @@ export type ProductDocument = {
   raw: Record<string, unknown>;
 };
 
+export type ProductSnapshotDocument = ProductDocument & {
+  snapshot_id: string;
+  pos_config_odoo_id: number;
+};
+
 export type ProductImageDocument = {
   odoo_product_id: number;
   warehouse_odoo_id: number;
@@ -40,6 +45,13 @@ export type SyncStateDocument = {
   product_count: number;
   last_synced_at: Date;
   last_odoo_write_date: string | null;
+  active_snapshot_id?: string | null;
+  sync_status?: "running" | "complete" | "failed";
+  source_total?: number;
+  last_run_id?: string | null;
+  last_run_started_at?: Date | null;
+  last_run_completed_at?: Date | null;
+  last_error?: string | null;
 };
 
 export function normalizeProduct(input: Record<string, unknown>): ProductDocument {

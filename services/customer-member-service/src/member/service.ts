@@ -109,14 +109,25 @@ export class CustomerMemberService {
       this.repository.syncState(companyId)
     ]);
 
+    const snapshotId = state?.active_snapshot_id || null;
+    const syncStatus = state?.sync_status || (state?.last_synced_at ? "complete" : "running");
+    const page = {
+      ...members,
+      snapshot_id: snapshotId,
+      sync_status: syncStatus
+    };
+
     return {
-      partners: members,
-      members,
+      partners: page,
+      members: page,
       tiers,
       loyalty_programs: loyaltyPrograms,
       company_id: companyId,
       last_synced_at: state?.last_synced_at?.toISOString?.() || null,
-      last_odoo_write_date: state?.last_odoo_write_date || null
+      last_odoo_write_date: state?.last_odoo_write_date || null,
+      sync_state: state,
+      snapshot_id: snapshotId,
+      sync_status: syncStatus
     };
   }
 

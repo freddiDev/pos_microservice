@@ -1,10 +1,11 @@
 import { Collection, Db, MongoClient } from "mongodb";
 
 import { AppConfig } from "./config.js";
-import { ProductDocument, ProductImageDocument, SyncStateDocument } from "./catalog/normalizers.js";
+import { ProductDocument, ProductImageDocument, ProductSnapshotDocument, SyncStateDocument } from "./catalog/normalizers.js";
 
 export type CatalogCollections = {
   products: Collection<ProductDocument>;
+  productSnapshots: Collection<ProductSnapshotDocument>;
   productImages: Collection<ProductImageDocument>;
   categories: Collection<Record<string, unknown>>;
   uoms: Collection<Record<string, unknown>>;
@@ -31,6 +32,7 @@ export async function connectMongo(config: AppConfig): Promise<MongoResources> {
   const db = client.db(config.mongoDbName);
   const collections = {
     products: db.collection<ProductDocument>("catalog_products"),
+    productSnapshots: db.collection<ProductSnapshotDocument>("catalog_product_snapshots"),
     productImages: db.collection<ProductImageDocument>("catalog_product_images"),
     categories: db.collection<Record<string, unknown>>("catalog_categories"),
     uoms: db.collection<Record<string, unknown>>("catalog_uoms"),
@@ -49,6 +51,22 @@ export async function ensureIndexes(collections: CatalogCollections): Promise<vo
     collections.products.createIndex(
       { odoo_product_id: 1, warehouse_odoo_id: 1 },
       { unique: true, name: "uniq_product_warehouse" }
+    ),
+    collections.productSnapshots.createIndex(
+      { snapshot_id: 1, pos_config_odoo_id: 1, odoo_product_id: 1, warehouse_odoo_id: 1 },
+      { unique: true, name: "uniq_product_snapshot" }
+    ),
+    collections.productSnapshots.createIndex(
+      { snapshot_id: 1, warehouse_odoo_id: 1, write_date: 1, odoo_product_id: 1 },
+      { name: "idx_product_snapshot_list" }
+    ),
+    collections.productSnapshots.createIndex(
+      { snapshot_id: 1, warehouse_odoo_id: 1, barcode: 1 },
+      { name: "idx_product_snapshot_barcode" }
+    ),
+    collections.productSnapshots.createIndex(
+      { snapshot_id: 1, warehouse_odoo_id: 1, odoo_product_id: 1 },
+      { name: "idx_product_snapshot_id" }
     ),
     collections.products.createIndex({ barcode: 1, warehouse_odoo_id: 1 }, { name: "idx_barcode_warehouse" }),
     collections.products.createIndex({ warehouse_odoo_id: 1, write_date: 1 }, { name: "idx_warehouse_write_date" }),

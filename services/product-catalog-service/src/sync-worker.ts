@@ -1,4 +1,5 @@
 import type { Redis } from "ioredis";
+import { randomUUID } from "node:crypto";
 
 import type { AppConfig } from "./config.js";
 import { normalizeProduct, ProductDocument, ProductImageDocument } from "./catalog/normalizers.js";
@@ -147,6 +148,7 @@ export class CatalogSyncWorker {
     let syncedProducts = 0;
     let syncedImages = 0;
     let failedImages = 0;
+    const configResults: Record<string, unknown>[] = [];
     for (const posConfigId of configIds) {
       const result = await this.syncConfig(posConfigId, session.accessToken);
       if (result.locked === true) continue;
@@ -154,6 +156,7 @@ export class CatalogSyncWorker {
       syncedProducts += result.synced_count;
       syncedImages += result.images_synced;
       failedImages += result.images_failed;
+      configResults.push({ pos_config_id: posConfigId, ...result });
     }
 
     return {
@@ -161,14 +164,25 @@ export class CatalogSyncWorker {
       configs_synced: syncedConfigs,
       products_synced: syncedProducts,
       images_synced: syncedImages,
-      images_failed: failedImages
+      images_failed: failedImages,
+      configs: configResults
     };
   }
 
   private async syncConfig(
     posConfigId: number,
     accessToken: string
-  ): Promise<{ locked?: boolean; synced_count: number; images_synced: number; images_failed: number }> {
+  ): Promise<{
+    locked?: boolean;
+    synced_count: number;
+    images_synced: number;
+    images_failed: number;
+    snapshot_id?: string;
+    source_total?: number;
+    service_total?: number;
+    source_scope?: string;
+    snapshot_replaced?: boolean;
+  }> {
     const lockKey = `sync:catalog:pos_config:${posConfigId}`;
     const lock = await this.redis.set(lockKey, this.workerId, "PX", this.lockTtlMs, "NX");
     if (lock !== "OK") {
@@ -176,11 +190,14 @@ export class CatalogSyncWorker {
       return { locked: true, synced_count: 0, images_synced: 0, images_failed: 0 };
     }
 
+    const snapshotId = `${new Date().toISOString()}-${randomUUID()}`;
     try {
-      const state = await this.repository.syncState(posConfigId);
-      const updatedAfter = subtractMinutes(state?.last_odoo_write_date, this.config.syncLookbackMinutes);
+      await this.repository.beginSnapshot(posConfigId, snapshotId);
       let offset = 0;
       let syncedCount = 0;
+      let sourceTotal = 0;
+      let latestWriteDate: string | null = null;
+      let firstSnapshot: Record<string, unknown> | null = null;
       let imageSyncedCount = 0;
       let imageFailedCount = 0;
       let hasMore = true;
@@ -189,25 +206,50 @@ export class CatalogSyncWorker {
         const snapshot = await fetchOdooCatalog(this.config, accessToken, {
           pos_config: posConfigId,
           offset,
-          limit: this.config.catalogMaxLimit,
-          updated_after: updatedAfter
+          limit: this.config.catalogMaxLimit
         });
-        await this.repository.upsertSnapshot(posConfigId, snapshot);
+        firstSnapshot ??= snapshot;
 
         const page = pageInfo(snapshot.products);
-        const imageResult = await this.syncImagesForPage(accessToken, page.items);
+        if (sourceTotal === 0) sourceTotal = page.total;
+        if (page.total !== sourceTotal) {
+          throw new Error(`Product source total changed during sync: ${sourceTotal} -> ${page.total}.`);
+        }
+        const written = await this.repository.writeSnapshotPage(posConfigId, snapshotId, snapshot);
+        latestWriteDate = maxWriteDate(latestWriteDate, written.latestWriteDate);
+        const imageResult = await this.syncImagesForPage(accessToken, page.items, snapshotId, posConfigId);
         syncedCount += page.items.length;
         imageSyncedCount += imageResult.synced;
         imageFailedCount += imageResult.failed;
+        if (page.hasMore && page.items.length === 0) {
+          throw new Error("Odoo returned an empty product page while has_more=true.");
+        }
         hasMore = page.hasMore && page.items.length > 0;
         offset += page.items.length;
       }
 
+      const state = await this.repository.commitSnapshot(
+        posConfigId,
+        snapshotId,
+        firstSnapshot ?? {},
+        sourceTotal,
+        latestWriteDate
+      );
+      void this.repository.pruneSnapshots(posConfigId, snapshotId);
+
       return {
         synced_count: syncedCount,
         images_synced: imageSyncedCount,
-        images_failed: imageFailedCount
+        images_failed: imageFailedCount,
+        snapshot_id: snapshotId,
+        source_total: sourceTotal,
+        service_total: state.product_count,
+        source_scope: "product.product:active=true,available_in_pos=true,sale_ok=true,warehouse_cv_assignment",
+        snapshot_replaced: true
       };
+    } catch (error) {
+      await this.repository.markSnapshotFailed(posConfigId, snapshotId, errorMessage(error));
+      throw error;
     } finally {
       if ((await this.redis.get(lockKey)) === this.workerId) {
         await this.redis.del(lockKey);
@@ -215,7 +257,12 @@ export class CatalogSyncWorker {
     }
   }
 
-  private async syncImagesForPage(accessToken: string, items: Record<string, unknown>[]): Promise<{ synced: number; failed: number }> {
+  private async syncImagesForPage(
+    accessToken: string,
+    items: Record<string, unknown>[],
+    snapshotId: string,
+    posConfigId: number
+  ): Promise<{ synced: number; failed: number }> {
     if (!this.config.catalogImageSyncEnabled || !items.length) {
       return { synced: 0, failed: 0 };
     }
@@ -233,7 +280,7 @@ export class CatalogSyncWorker {
     );
     const images = results.flatMap((item) => (item.image && item.error === null ? [item.image] : []));
     if (images.length) {
-      await this.repository.upsertProductImages(images);
+      await this.repository.upsertProductImages(images, snapshotId, posConfigId);
     }
 
     const failed = results.filter((item) => item.error !== null).length;
@@ -379,9 +426,9 @@ function unwrapEnvelope(body: unknown): Record<string, unknown> | undefined {
   return record;
 }
 
-function pageInfo(source: unknown): { items: Record<string, unknown>[]; hasMore: boolean } {
+function pageInfo(source: unknown): { items: Record<string, unknown>[]; total: number; hasMore: boolean } {
   if (!source || typeof source !== "object" || Array.isArray(source)) {
-    return { items: [], hasMore: false };
+    return { items: [], total: 0, hasMore: false };
   }
   const page = source as Record<string, unknown>;
   const items = Array.isArray(page.items)
@@ -389,8 +436,15 @@ function pageInfo(source: unknown): { items: Record<string, unknown>[]; hasMore:
     : [];
   return {
     items,
+    total: toNumber(page.total) || items.length,
     hasMore: page.has_more === true || page.hasMore === true
   };
+}
+
+function maxWriteDate(current: string | null, candidate: string | null): string | null {
+  if (!current) return candidate;
+  if (!candidate) return current;
+  return candidate > current ? candidate : current;
 }
 
 async function mapWithConcurrency<T, R>(items: T[], concurrency: number, mapper: (item: T) => Promise<R>): Promise<R[]> {
@@ -409,15 +463,6 @@ async function mapWithConcurrency<T, R>(items: T[], concurrency: number, mapper:
   );
 
   return results;
-}
-
-function subtractMinutes(value: string | null | undefined, minutes: number): string | undefined {
-  if (!value) return undefined;
-  if (minutes <= 0) return value;
-  const parsed = new Date(`${value.replace(" ", "T").replace(/Z$/, "")}Z`);
-  if (Number.isNaN(parsed.getTime())) return value;
-  parsed.setMinutes(parsed.getMinutes() - minutes);
-  return parsed.toISOString().slice(0, 19).replace("T", " ");
 }
 
 function toNumber(value: unknown): number | null {

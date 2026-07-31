@@ -4,6 +4,8 @@ import { MemberCollections } from "../db.js";
 import {
   loyaltyProgramToApi,
   MemberDocument,
+  MemberSnapshotDocument,
+  MemberSyncStateDocument,
   memberToApi,
   normalizeLoyaltyProgram,
   normalizeMember,
@@ -24,6 +26,137 @@ export type MemberListOptions = {
 
 export class MemberRepository {
   constructor(private readonly collections: MemberCollections) {}
+
+  async beginSnapshot(companyOdooId: number, snapshotId: string, startedAt = new Date()): Promise<void> {
+    await this.collections.memberSnapshots.deleteMany({ snapshot_id: snapshotId, company_odoo_id: companyOdooId });
+    await this.collections.syncState.updateOne(
+      { company_odoo_id: companyOdooId },
+      {
+        $set: {
+          company_odoo_id: companyOdooId,
+          sync_status: "running",
+          last_run_id: snapshotId,
+          last_run_started_at: startedAt,
+          last_error: null
+        }
+      },
+      { upsert: true }
+    );
+  }
+
+  async writeSnapshotPage(
+    companyOdooId: number,
+    snapshotId: string,
+    snapshot: Record<string, unknown>
+  ): Promise<{ members: number; latestWriteDate: string | null }> {
+    const members = extractMemberItems(snapshot).map((item) => ({
+      ...normalizeMember(item, companyOdooId),
+      snapshot_id: snapshotId
+    }));
+    if (members.length) {
+      await this.collections.memberSnapshots.bulkWrite(
+        members.map((member) => ({
+          updateOne: {
+            filter: {
+              snapshot_id: snapshotId,
+              company_odoo_id: member.company_odoo_id,
+              odoo_partner_id: member.odoo_partner_id
+            },
+            update: { $set: member },
+            upsert: true
+          }
+        })),
+        { ordered: false }
+      );
+    }
+
+    return {
+      members: members.length,
+      latestWriteDate: latestWriteDate(members)
+    };
+  }
+
+  async replaceAuxiliaryData(
+    companyOdooId: number,
+    snapshot: Record<string, unknown>
+  ): Promise<void> {
+    const tiers = extractArray(snapshot.tiers).map((item) => normalizeTier(item, companyOdooId));
+    const loyaltyPrograms = extractArray(snapshot.loyalty_programs).map((item) => normalizeLoyaltyProgram(item, companyOdooId));
+
+    await Promise.all([
+      this.collections.tiers.deleteMany({ company_odoo_id: companyOdooId }),
+      this.collections.loyaltyPrograms.deleteMany({ company_odoo_id: companyOdooId })
+    ]);
+    await Promise.all([
+      this.upsertSimple(
+        this.collections.tiers,
+        tiers.map((tier) => ({
+          filter: { company_odoo_id: tier.company_odoo_id, odoo_id: tier.odoo_id },
+          document: tier
+        }))
+      ),
+      this.upsertSimple(
+        this.collections.loyaltyPrograms,
+        loyaltyPrograms.map((program) => ({
+          filter: { company_odoo_id: program.company_odoo_id, odoo_id: program.odoo_id },
+          document: program
+        }))
+      )
+    ]);
+  }
+
+  async commitSnapshot(
+    companyOdooId: number,
+    snapshotId: string,
+    sourceTotal: number,
+    latestWriteDate: string | null,
+    completedAt = new Date()
+  ): Promise<MemberSyncStateDocument> {
+    const memberCount = await this.collections.memberSnapshots.countDocuments({
+      snapshot_id: snapshotId,
+      company_odoo_id: companyOdooId
+    });
+    if (memberCount !== sourceTotal) {
+      throw new Error(`Member snapshot validation failed: source=${sourceTotal}, staged=${memberCount}.`);
+    }
+
+    const previous = await this.syncState(companyOdooId);
+    const state: MemberSyncStateDocument = {
+      company_odoo_id: companyOdooId,
+      member_count: memberCount,
+      last_synced_at: completedAt,
+      last_odoo_write_date: latestWriteDate || previous?.last_odoo_write_date || null,
+      active_snapshot_id: snapshotId,
+      sync_status: "complete",
+      source_total: sourceTotal,
+      last_run_id: snapshotId,
+      last_run_started_at: previous?.last_run_started_at || null,
+      last_run_completed_at: completedAt,
+      last_error: null
+    };
+    await this.collections.syncState.updateOne(
+      { company_odoo_id: companyOdooId },
+      { $set: state },
+      { upsert: true }
+    );
+    return state;
+  }
+
+  async markSnapshotFailed(companyOdooId: number, snapshotId: string, error: string): Promise<void> {
+    await this.collections.syncState.updateOne(
+      { company_odoo_id: companyOdooId },
+      { $set: { sync_status: "failed", last_run_id: snapshotId, last_error: error } },
+      { upsert: true }
+    );
+    await this.collections.memberSnapshots.deleteMany({ snapshot_id: snapshotId, company_odoo_id: companyOdooId });
+  }
+
+  async pruneSnapshots(companyOdooId: number, activeSnapshotId: string): Promise<void> {
+    await this.collections.memberSnapshots.deleteMany({
+      company_odoo_id: companyOdooId,
+      snapshot_id: { $ne: activeSnapshotId }
+    });
+  }
 
   async upsertSnapshot(companyOdooId: number, snapshot: Record<string, unknown>): Promise<void> {
     const members = extractMemberItems(snapshot).map((item) => normalizeMember(item, companyOdooId));
@@ -72,15 +205,21 @@ export class MemberRepository {
   }
 
   async listMembers(options: MemberListOptions): Promise<Record<string, unknown>> {
-    const filter = this.memberFilter(options);
+    const state = await this.syncState(options.companyOdooId);
+    const snapshotId = state?.active_snapshot_id || null;
+    if (state?.sync_status === "running" && !snapshotId) {
+      return emptyMemberPage(options.offset, options.limit);
+    }
+    const collection = snapshotId ? this.collections.memberSnapshots : this.collections.members;
+    const filter = this.memberFilter(options, snapshotId);
     const [items, total] = await Promise.all([
-      this.collections.members
+      collection
         .find(filter, { projection: { _id: 0, raw: 0 } })
         .sort({ write_date: 1, odoo_partner_id: 1 })
         .skip(options.offset)
         .limit(options.limit)
         .toArray(),
-      this.collections.members.countDocuments(filter)
+      collection.countDocuments(filter)
     ]);
 
     return {
@@ -93,8 +232,18 @@ export class MemberRepository {
   }
 
   async findByOdooId(companyOdooId: number, partnerId: number): Promise<Record<string, unknown> | null> {
-    const document = await this.collections.members.findOne(
-      { company_odoo_id: companyOdooId, odoo_partner_id: partnerId },
+    const state = await this.syncState(companyOdooId);
+    if (state?.sync_status === "running" && !state.active_snapshot_id) return null;
+    const collection = state?.active_snapshot_id ? this.collections.memberSnapshots : this.collections.members;
+    const filter: Filter<MemberDocument> = {
+      company_odoo_id: companyOdooId,
+      odoo_partner_id: partnerId
+    };
+    if (state?.active_snapshot_id) {
+      Object.assign(filter, { snapshot_id: state.active_snapshot_id });
+    }
+    const document = await collection.findOne(
+      filter,
       { projection: { _id: 0, raw: 0 } }
     );
     return document ? memberToApi(document) : null;
@@ -116,8 +265,14 @@ export class MemberRepository {
     return programs.map(loyaltyProgramToApi);
   }
 
-  private memberFilter(options: MemberListOptions): Filter<MemberDocument> {
-    const filter: Filter<MemberDocument> = { company_odoo_id: options.companyOdooId };
+  private memberFilter(options: MemberListOptions, snapshotId: string | null): Filter<MemberDocument> {
+    const filter: Filter<MemberDocument> = {
+      company_odoo_id: options.companyOdooId,
+      is_membership: true
+    };
+    if (snapshotId) {
+      Object.assign(filter, { snapshot_id: snapshotId });
+    }
     if (!options.includeInactive) {
       filter.active = true;
     }
@@ -205,6 +360,10 @@ function latestWriteDate(members: MemberDocument[]): string | null {
       .sort()
       .at(-1) || null
   );
+}
+
+function emptyMemberPage(offset: number, limit: number): Record<string, unknown> {
+  return { items: [], offset, limit, total: 0, has_more: false };
 }
 
 function isRecord(item: unknown): item is Record<string, unknown> {
