@@ -2,7 +2,7 @@ import type { Redis } from "ioredis";
 import { randomUUID } from "node:crypto";
 
 import type { AppConfig } from "./config.js";
-import { normalizeProduct, ProductDocument, ProductImageDocument } from "./catalog/normalizers.js";
+import { ProductDocument, ProductImageDocument } from "./catalog/normalizers.js";
 import { fetchOdooCatalog, fetchOdooProductImage } from "./odoo-client.js";
 import type { ProductCatalogRepository } from "./catalog/repository.js";
 
@@ -218,10 +218,7 @@ export class CatalogSyncWorker {
         }
         const written = await this.repository.writeSnapshotPage(posConfigId, snapshotId, snapshot);
         latestWriteDate = maxWriteDate(latestWriteDate, written.latestWriteDate);
-        const imageResult = await this.syncImagesForPage(accessToken, page.items, snapshotId, posConfigId);
         syncedCount += page.items.length;
-        imageSyncedCount += imageResult.synced;
-        imageFailedCount += imageResult.failed;
         if (syncedCount < sourceTotal && page.items.length === 0) {
           throw new Error("Odoo returned an empty product page before source_total was reached.");
         }
@@ -237,6 +234,28 @@ export class CatalogSyncWorker {
         latestWriteDate
       );
       void this.repository.pruneSnapshots(posConfigId, snapshotId);
+
+      // The catalog must become available before downloading tens of
+      // thousands of optional image blobs. Images are updated against the
+      // active snapshot after the POS data is already readable.
+      if (this.config.catalogImageSyncEnabled) {
+        try {
+          const imageResult = await this.syncImagesForSnapshot(
+            accessToken,
+            snapshotId,
+            posConfigId
+          );
+          imageSyncedCount = imageResult.synced;
+          imageFailedCount = imageResult.failed;
+        } catch (error) {
+          // Image cache failure must not invalidate an already committed
+          // catalog snapshot. The next worker run can retry image sync.
+          this.logger.error(
+            { error: errorMessage(error), snapshot_id: snapshotId },
+            "Catalog committed but product image sync was incomplete."
+          );
+        }
+      }
 
       return {
         synced_count: syncedCount,
@@ -258,17 +277,46 @@ export class CatalogSyncWorker {
     }
   }
 
-  private async syncImagesForPage(
+  private async syncImagesForSnapshot(
     accessToken: string,
-    items: Record<string, unknown>[],
     snapshotId: string,
     posConfigId: number
   ): Promise<{ synced: number; failed: number }> {
-    if (!this.config.catalogImageSyncEnabled || !items.length) {
-      return { synced: 0, failed: 0 };
+    let offset = 0;
+    let synced = 0;
+    let failed = 0;
+    const batchSize = Math.max(this.config.catalogMaxLimit, 1000);
+
+    while (true) {
+      const products = await this.repository.listSnapshotProductsForImages(
+        posConfigId,
+        snapshotId,
+        offset,
+        batchSize
+      );
+      if (!products.length) break;
+
+      const result = await this.syncImagesForProducts(
+        accessToken,
+        products,
+        snapshotId,
+        posConfigId
+      );
+      synced += result.synced;
+      failed += result.failed;
+      offset += products.length;
     }
 
-    const products = items.map(normalizeProduct);
+    return { synced, failed };
+  }
+
+  private async syncImagesForProducts(
+    accessToken: string,
+    products: ProductDocument[],
+    snapshotId: string,
+    posConfigId: number
+  ): Promise<{ synced: number; failed: number }> {
+    if (!products.length) return { synced: 0, failed: 0 };
     const needingSync = await this.repository.imagesNeedingSync(products);
     if (!needingSync.length) {
       return { synced: 0, failed: 0 };

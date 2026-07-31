@@ -223,6 +223,27 @@ export class ProductCatalogRepository {
     };
   }
 
+  async listSnapshotProductsForImages(
+    posConfigId: number,
+    snapshotId: string,
+    offset: number,
+    limit: number
+  ): Promise<ProductDocument[]> {
+    return this.collections.productSnapshots
+      .find(
+        {
+          pos_config_odoo_id: posConfigId,
+          snapshot_id: snapshotId,
+          image_url: { $exists: true, $nin: [null, ""] }
+        },
+        { projection: { _id: 0, raw: 0 } }
+      )
+      .sort({ odoo_product_id: 1 })
+      .skip(offset)
+      .limit(limit)
+      .toArray();
+  }
+
   async findByBarcode(posConfigId: number, warehouseId: number, barcode: string): Promise<Record<string, unknown> | null> {
     const state = await this.syncState(posConfigId);
     if (state?.sync_status === "running" && !state.active_snapshot_id) return null;
