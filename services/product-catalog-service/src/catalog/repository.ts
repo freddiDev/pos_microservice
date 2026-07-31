@@ -201,6 +201,9 @@ export class ProductCatalogRepository {
       filter.write_date = { $gt: options.updatedAfter };
     }
 
+    const totalPromise = !options.updatedAfter && typeof state?.product_count === "number"
+      ? Promise.resolve(state.product_count)
+      : collection.countDocuments(filter);
     const [items, total] = await Promise.all([
       collection
         .find(filter, { projection: { _id: 0, raw: 0 } })
@@ -208,7 +211,7 @@ export class ProductCatalogRepository {
         .skip(options.offset)
         .limit(options.limit)
         .toArray(),
-      collection.countDocuments(filter)
+      totalPromise
     ]);
 
     return {

@@ -212,6 +212,13 @@ export class MemberRepository {
     }
     const collection = snapshotId ? this.collections.memberSnapshots : this.collections.members;
     const filter = this.memberFilter(options, snapshotId);
+    const canUseSyncCount = !options.updatedAfter &&
+      !options.query &&
+      !options.includeInactive &&
+      typeof state?.member_count === "number";
+    const totalPromise = canUseSyncCount
+      ? Promise.resolve(state!.member_count)
+      : collection.countDocuments(filter);
     const [items, total] = await Promise.all([
       collection
         .find(filter, { projection: { _id: 0, raw: 0 } })
@@ -219,7 +226,7 @@ export class MemberRepository {
         .skip(options.offset)
         .limit(options.limit)
         .toArray(),
-      collection.countDocuments(filter)
+      totalPromise
     ]);
 
     return {
