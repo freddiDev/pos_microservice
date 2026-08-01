@@ -3,6 +3,7 @@ from contextlib import asynccontextmanager
 
 import httpx
 from fastapi import FastAPI
+from fastapi.middleware.gzip import GZipMiddleware
 
 from app.api.router import include_service_routes
 from app.core.config import Settings, get_settings
@@ -64,6 +65,11 @@ def create_app() -> FastAPI:
         lifespan=lifespan,
     )
     app.state.settings = settings
+
+    # Catalog and member pages are JSON-heavy. Compress gateway responses so
+    # mobile clients do not need to receive multi-megabyte payloads per page.
+    if settings.service_role == "gateway":
+        app.add_middleware(GZipMiddleware, minimum_size=1024)
 
     if settings.service_role == "gateway":
         include_gateway_routes(app)
