@@ -27,6 +27,7 @@ export class CatalogSyncWorker {
   private stopped = true;
   private retryDelayMs: number;
   private session: OdooSyncSession | null = null;
+  private readonly imageJobs = new Map<number, Promise<void>>();
   private statusState: Record<string, unknown> = {
     domain: "catalog",
     enabled: false,
@@ -178,6 +179,7 @@ export class CatalogSyncWorker {
     synced_count: number;
     images_synced: number;
     images_failed: number;
+    images_pending?: boolean;
     snapshot_id?: string;
     source_total?: number;
     service_total?: number;
@@ -193,14 +195,13 @@ export class CatalogSyncWorker {
 
     const snapshotId = `${new Date().toISOString()}-${randomUUID()}`;
     try {
+      const previousState = await this.repository.syncState(posConfigId);
       await this.repository.beginSnapshot(posConfigId, snapshotId);
       let offset = 0;
       let syncedCount = 0;
       let sourceTotal = 0;
       let latestWriteDate: string | null = null;
       let firstSnapshot: Record<string, unknown> | null = null;
-      let imageSyncedCount = 0;
-      let imageFailedCount = 0;
       let hasMore = true;
 
       while (hasMore) {
@@ -226,6 +227,33 @@ export class CatalogSyncWorker {
         offset += page.items.length;
       }
 
+      const previousTotal = previousState?.source_total ?? previousState?.product_count;
+      const previousSnapshotId = previousState?.active_snapshot_id;
+      const unchanged = Boolean(
+        previousSnapshotId &&
+          previousTotal === sourceTotal &&
+          previousState.last_odoo_write_date &&
+          latestWriteDate &&
+          previousState.last_odoo_write_date === latestWriteDate
+      );
+      if (unchanged && previousSnapshotId) {
+        await this.repository.discardUnchangedSnapshot(posConfigId, snapshotId);
+        if (this.config.catalogImageSyncEnabled) {
+          this.scheduleImageSync(accessToken, previousSnapshotId!, posConfigId);
+        }
+        return {
+          synced_count: 0,
+          images_synced: 0,
+          images_failed: 0,
+          snapshot_id: previousSnapshotId,
+          source_total: sourceTotal,
+          service_total: previousState!.product_count,
+          source_scope: "product.product:active=true,available_in_pos=true,sale_ok=true,warehouse_cv_assignment",
+          snapshot_replaced: false,
+          images_pending: this.config.catalogImageSyncEnabled
+        };
+      }
+
       const state = await this.repository.commitSnapshot(
         posConfigId,
         snapshotId,
@@ -235,37 +263,23 @@ export class CatalogSyncWorker {
       );
       void this.repository.pruneSnapshots(posConfigId, snapshotId);
 
-      // The catalog must become available before downloading tens of
-      // thousands of optional image blobs. Images are updated against the
-      // active snapshot after the POS data is already readable.
+      // A full product snapshot is the sync contract. Image blobs are
+      // optional enrichment and must not keep the catalog worker in running
+      // state or delay the next product sync.
       if (this.config.catalogImageSyncEnabled) {
-        try {
-          const imageResult = await this.syncImagesForSnapshot(
-            accessToken,
-            snapshotId,
-            posConfigId
-          );
-          imageSyncedCount = imageResult.synced;
-          imageFailedCount = imageResult.failed;
-        } catch (error) {
-          // Image cache failure must not invalidate an already committed
-          // catalog snapshot. The next worker run can retry image sync.
-          this.logger.error(
-            { error: errorMessage(error), snapshot_id: snapshotId },
-            "Catalog committed but product image sync was incomplete."
-          );
-        }
+        this.scheduleImageSync(accessToken, snapshotId, posConfigId);
       }
 
       return {
         synced_count: syncedCount,
-        images_synced: imageSyncedCount,
-        images_failed: imageFailedCount,
+        images_synced: 0,
+        images_failed: 0,
         snapshot_id: snapshotId,
         source_total: sourceTotal,
         service_total: state.product_count,
         source_scope: "product.product:active=true,available_in_pos=true,sale_ok=true,warehouse_cv_assignment",
-        snapshot_replaced: true
+        snapshot_replaced: true,
+        images_pending: this.config.catalogImageSyncEnabled
       };
     } catch (error) {
       await this.repository.markSnapshotFailed(posConfigId, snapshotId, errorMessage(error));
@@ -275,6 +289,39 @@ export class CatalogSyncWorker {
         await this.redis.del(lockKey);
       }
     }
+  }
+
+  private scheduleImageSync(
+    accessToken: string,
+    snapshotId: string,
+    posConfigId: number
+  ): void {
+    const previous = this.imageJobs.get(posConfigId) ?? Promise.resolve();
+    const job = previous
+      .catch(() => undefined)
+      .then(async () => {
+        const result = await this.syncImagesForSnapshot(
+          accessToken,
+          snapshotId,
+          posConfigId
+        );
+        this.logger.info(
+          { pos_config_id: posConfigId, snapshot_id: snapshotId, ...result },
+          "Catalog image sync completed."
+        );
+      })
+      .catch((error) => {
+        this.logger.error(
+          { pos_config_id: posConfigId, snapshot_id: snapshotId, error: errorMessage(error) },
+          "Catalog image sync failed; product snapshot remains usable."
+        );
+      });
+    const tracked = job.finally(() => {
+      if (this.imageJobs.get(posConfigId) === tracked) {
+        this.imageJobs.delete(posConfigId);
+      }
+    });
+    this.imageJobs.set(posConfigId, tracked);
   }
 
   private async syncImagesForSnapshot(

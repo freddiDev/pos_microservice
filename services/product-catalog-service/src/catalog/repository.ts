@@ -137,6 +137,30 @@ export class ProductCatalogRepository {
     await this.collections.productSnapshots.deleteMany({ snapshot_id: snapshotId, pos_config_odoo_id: posConfigId });
   }
 
+  async discardUnchangedSnapshot(
+    posConfigId: number,
+    snapshotId: string,
+    completedAt = new Date()
+  ): Promise<void> {
+    await this.collections.productSnapshots.deleteMany({
+      snapshot_id: snapshotId,
+      pos_config_odoo_id: posConfigId
+    });
+    await this.collections.syncState.updateOne(
+      {
+        pos_config_odoo_id: posConfigId,
+        last_run_id: snapshotId
+      },
+      {
+        $set: {
+          sync_status: "complete",
+          last_run_completed_at: completedAt,
+          last_error: null
+        }
+      }
+    );
+  }
+
   async pruneSnapshots(posConfigId: number, activeSnapshotId: string): Promise<void> {
     const previous = await this.collections.productSnapshots
       .find({ pos_config_odoo_id: posConfigId, snapshot_id: { $ne: activeSnapshotId } })
