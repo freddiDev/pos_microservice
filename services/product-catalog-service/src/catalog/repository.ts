@@ -15,6 +15,7 @@ export type ProductListOptions = {
   warehouseId: number;
   offset: number;
   limit: number;
+  snapshotId?: string;
   updatedAfter?: string;
 };
 
@@ -137,9 +138,17 @@ export class ProductCatalogRepository {
   }
 
   async pruneSnapshots(posConfigId: number, activeSnapshotId: string): Promise<void> {
+    const previous = await this.collections.productSnapshots
+      .find({ pos_config_odoo_id: posConfigId, snapshot_id: { $ne: activeSnapshotId } })
+      .sort({ snapshot_id: -1 })
+      .limit(1)
+      .toArray();
+    const keepSnapshotIds = [activeSnapshotId, previous[0]?.snapshot_id].filter(
+      (value): value is string => Boolean(value)
+    );
     await this.collections.productSnapshots.deleteMany({
       pos_config_odoo_id: posConfigId,
-      snapshot_id: { $ne: activeSnapshotId }
+      snapshot_id: { $nin: keepSnapshotIds }
     });
   }
 
@@ -190,7 +199,7 @@ export class ProductCatalogRepository {
     const state = options.posConfigId
       ? await this.syncState(options.posConfigId)
       : await this.syncStateByWarehouse(options.warehouseId);
-    const snapshotId = state?.active_snapshot_id || null;
+    const snapshotId = options.snapshotId || state?.active_snapshot_id || null;
     if (state?.sync_status === "running" && !snapshotId) {
       return emptyProductPage(options.offset, options.limit);
     }
@@ -201,7 +210,7 @@ export class ProductCatalogRepository {
       filter.write_date = { $gt: options.updatedAfter };
     }
 
-    const totalPromise = !options.updatedAfter && typeof state?.product_count === "number"
+    const totalPromise = !options.snapshotId && !options.updatedAfter && typeof state?.product_count === "number"
       ? Promise.resolve(state.product_count)
       : collection.countDocuments(filter);
     const [items, total] = await Promise.all([

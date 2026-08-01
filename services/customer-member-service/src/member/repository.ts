@@ -19,6 +19,7 @@ export type MemberListOptions = {
   companyOdooId: number;
   offset: number;
   limit: number;
+  snapshotId?: string;
   updatedAfter?: string;
   query?: string;
   includeInactive?: boolean;
@@ -152,9 +153,17 @@ export class MemberRepository {
   }
 
   async pruneSnapshots(companyOdooId: number, activeSnapshotId: string): Promise<void> {
+    const previous = await this.collections.memberSnapshots
+      .find({ company_odoo_id: companyOdooId, snapshot_id: { $ne: activeSnapshotId } })
+      .sort({ snapshot_id: -1 })
+      .limit(1)
+      .toArray();
+    const keepSnapshotIds = [activeSnapshotId, previous[0]?.snapshot_id].filter(
+      (value): value is string => Boolean(value)
+    );
     await this.collections.memberSnapshots.deleteMany({
       company_odoo_id: companyOdooId,
-      snapshot_id: { $ne: activeSnapshotId }
+      snapshot_id: { $nin: keepSnapshotIds }
     });
   }
 
@@ -206,13 +215,13 @@ export class MemberRepository {
 
   async listMembers(options: MemberListOptions): Promise<Record<string, unknown>> {
     const state = await this.syncState(options.companyOdooId);
-    const snapshotId = state?.active_snapshot_id || null;
+    const snapshotId = options.snapshotId || state?.active_snapshot_id || null;
     if (state?.sync_status === "running" && !snapshotId) {
       return emptyMemberPage(options.offset, options.limit);
     }
     const collection = snapshotId ? this.collections.memberSnapshots : this.collections.members;
     const filter = this.memberFilter(options, snapshotId);
-    const canUseSyncCount = !options.updatedAfter &&
+    const canUseSyncCount = !options.snapshotId && !options.updatedAfter &&
       !options.query &&
       !options.includeInactive &&
       typeof state?.member_count === "number";

@@ -84,13 +84,14 @@ export class ProductCatalogService {
       };
     }
 
-    const snapshotId = state.active_snapshot_id || null;
+    const snapshotId = request.snapshot_id || state.active_snapshot_id || null;
     const syncStatus = state.sync_status || (state.last_synced_at ? "complete" : "running");
     const page = await this.repository.listProducts({
       posConfigId,
       warehouseId: state.warehouse_odoo_id,
       offset: request.offset,
       limit,
+      snapshotId: snapshotId || undefined,
       updatedAfter: request.updated_after || request.last_update
     });
     return {

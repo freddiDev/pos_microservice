@@ -100,6 +100,7 @@ export class CustomerMemberService {
         companyOdooId: companyId,
         offset: request.offset,
         limit: this.clampLimit(request.limit),
+        snapshotId: request.snapshot_id,
         updatedAfter,
         query,
         includeInactive: request.include_inactive
@@ -109,7 +110,7 @@ export class CustomerMemberService {
       this.repository.syncState(companyId)
     ]);
 
-    const snapshotId = state?.active_snapshot_id || null;
+    const snapshotId = request.snapshot_id || state?.active_snapshot_id || null;
     const syncStatus = state?.sync_status || (state?.last_synced_at ? "complete" : "running");
     const page = {
       ...members,
