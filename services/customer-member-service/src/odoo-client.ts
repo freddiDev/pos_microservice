@@ -16,7 +16,7 @@ export async function fetchOdooMembers(
   payload: OdooMemberRequest
 ): Promise<Record<string, unknown>> {
   const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), config.requestTimeoutMs);
+  const timeout = setTimeout(() => controller.abort(), config.odooRequestTimeoutMs);
   try {
     const response = await fetch(`${config.odooBaseUrl}/api/microservice/members`, {
       method: "POST",

@@ -234,7 +234,11 @@ export class ProductCatalogRepository {
       filter.write_date = { $gt: options.updatedAfter };
     }
 
-    const totalPromise = !options.snapshotId && !options.updatedAfter && typeof state?.product_count === "number"
+    // The mobile client pins every page to the active snapshot after the
+    // first response. Reusing the validated sync-state count avoids a full
+    // Mongo count scan for every page of a large catalog.
+    const snapshotIsActive = !options.snapshotId || options.snapshotId === state?.active_snapshot_id;
+    const totalPromise = snapshotIsActive && !options.updatedAfter && typeof state?.product_count === "number"
       ? Promise.resolve(state.product_count)
       : collection.countDocuments(filter);
     const [items, total] = await Promise.all([

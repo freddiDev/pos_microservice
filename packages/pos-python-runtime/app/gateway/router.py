@@ -24,6 +24,14 @@ MEMBER_PREFIXES = (
     "members",
 )
 
+HEAVY_ROUTE_PREFIXES = (
+    *PRODUCT_PREFIXES,
+    *MEMBER_PREFIXES,
+)
+
+HEAVY_UPSTREAM_READ_TIMEOUT_SECONDS = 120.0
+HEAVY_UPSTREAM_WRITE_TIMEOUT_SECONDS = 60.0
+
 HOP_BY_HOP_HEADERS = {
     "connection",
     "keep-alive",
@@ -36,6 +44,19 @@ HOP_BY_HOP_HEADERS = {
     "host",
     "content-length",
 }
+
+
+def _upstream_timeout(settings: object, route: str) -> httpx.Timeout | float:
+    """Allow catalog/member pages to finish without weakening auth timeouts."""
+    if route.startswith(HEAVY_ROUTE_PREFIXES):
+        request_timeout = float(settings.request_timeout_seconds)
+        return httpx.Timeout(
+            connect=request_timeout,
+            read=HEAVY_UPSTREAM_READ_TIMEOUT_SECONDS,
+            write=HEAVY_UPSTREAM_WRITE_TIMEOUT_SECONDS,
+            pool=request_timeout,
+        )
+    return float(settings.request_timeout_seconds)
 
 
 def include_gateway_routes(app: FastAPI) -> None:
@@ -78,6 +99,7 @@ def include_gateway_routes(app: FastAPI) -> None:
                 target,
                 content=await request.body(),
                 headers=headers,
+                timeout=_upstream_timeout(settings, route),
             )
         except httpx.HTTPError as exc:
             raise HTTPException(

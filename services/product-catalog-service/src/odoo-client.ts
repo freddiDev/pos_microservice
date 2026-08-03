@@ -18,7 +18,7 @@ export async function fetchOdooCatalog(
   payload: OdooCatalogRequest
 ): Promise<Record<string, unknown>> {
   const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), config.requestTimeoutMs);
+  const timeout = setTimeout(() => controller.abort(), config.odooRequestTimeoutMs);
   try {
     const response = await fetch(`${config.odooBaseUrl}/api/microservice/catalog/products`, {
       method: "POST",
@@ -67,7 +67,7 @@ export async function fetchOdooProductImage(
 ): Promise<OdooProductImage | null> {
   const url = productImageUrl(config, productId, sourceUrl);
   const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), config.requestTimeoutMs);
+  const timeout = setTimeout(() => controller.abort(), config.odooRequestTimeoutMs);
   try {
     const response = await fetch(url, {
       method: "GET",

@@ -192,6 +192,7 @@ export class CatalogSyncWorker {
       this.logger.debug({ pos_config: posConfigId }, "Catalog sync skipped because lock is held.");
       return { locked: true, synced_count: 0, images_synced: 0, images_failed: 0 };
     }
+    const lockRenewal = this.startLockRenewal(lockKey);
 
     const snapshotId = `${new Date().toISOString()}-${randomUUID()}`;
     try {
@@ -254,22 +255,6 @@ export class CatalogSyncWorker {
         };
       }
 
-      let eagerImages = { synced: 0, failed: 0 };
-      if (this.config.catalogImageSyncEnabled && this.config.catalogImageEagerCount > 0) {
-        const eagerProducts = await this.repository.listSnapshotProductsForImages(
-          posConfigId,
-          snapshotId,
-          0,
-          this.config.catalogImageEagerCount
-        );
-        eagerImages = await this.syncImagesForProducts(
-          accessToken,
-          eagerProducts,
-          snapshotId,
-          posConfigId
-        );
-      }
-
       const state = await this.repository.commitSnapshot(
         posConfigId,
         snapshotId,
@@ -288,8 +273,10 @@ export class CatalogSyncWorker {
 
       return {
         synced_count: syncedCount,
-        images_synced: eagerImages.synced,
-        images_failed: eagerImages.failed,
+        // Image enrichment starts after the product snapshot is available.
+        // It must never extend the product sync critical path.
+        images_synced: 0,
+        images_failed: 0,
         snapshot_id: snapshotId,
         source_total: sourceTotal,
         service_total: state.product_count,
@@ -301,10 +288,32 @@ export class CatalogSyncWorker {
       await this.repository.markSnapshotFailed(posConfigId, snapshotId, errorMessage(error));
       throw error;
     } finally {
+      clearInterval(lockRenewal);
       if ((await this.redis.get(lockKey)) === this.workerId) {
         await this.redis.del(lockKey);
       }
     }
+  }
+
+  private startLockRenewal(lockKey: string): NodeJS.Timeout {
+    const renewal = setInterval(() => {
+      void this.redis
+        .eval(
+          "if redis.call('get', KEYS[1]) == ARGV[1] then return redis.call('pexpire', KEYS[1], ARGV[2]) else return 0 end",
+          1,
+          lockKey,
+          this.workerId,
+          String(this.lockTtlMs)
+        )
+        .catch((error) => {
+          this.logger.warn(
+            { lock_key: lockKey, error: errorMessage(error) },
+            "Failed to renew catalog sync lock."
+          );
+        });
+    }, Math.max(Math.floor(this.lockTtlMs / 3), 5_000));
+    renewal.unref?.();
+    return renewal;
   }
 
   private scheduleImageSync(
@@ -349,13 +358,17 @@ export class CatalogSyncWorker {
     let synced = 0;
     let failed = 0;
     const batchSize = Math.max(this.config.catalogMaxLimit, 1000);
+    let firstBatch = true;
 
     while (true) {
+      const limit = firstBatch
+        ? Math.min(batchSize, Math.max(this.config.catalogImageEagerCount, 1))
+        : batchSize;
       const products = await this.repository.listSnapshotProductsForImages(
         posConfigId,
         snapshotId,
         offset,
-        batchSize
+        limit
       );
       if (!products.length) break;
 
@@ -368,6 +381,7 @@ export class CatalogSyncWorker {
       synced += result.synced;
       failed += result.failed;
       offset += products.length;
+      firstBatch = false;
     }
 
     return { synced, failed };
@@ -494,7 +508,7 @@ async function postOdoo(
   accessToken?: string
 ): Promise<Record<string, unknown>> {
   const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), config.requestTimeoutMs);
+  const timeout = setTimeout(() => controller.abort(), config.odooRequestTimeoutMs);
   try {
     const response = await fetch(`${config.odooBaseUrl}${path}`, {
       method: "POST",

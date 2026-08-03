@@ -144,6 +144,7 @@ export class MemberSyncWorker {
       this.logger.debug({ company_id: session.companyOdooId }, "Member sync skipped because lock is held.");
       return { locked: true, members_synced: 0 };
     }
+    const lockRenewal = this.startLockRenewal(lockKey);
 
     const snapshotId = `${new Date().toISOString()}-${randomUUID()}`;
     try {
@@ -200,10 +201,32 @@ export class MemberSyncWorker {
       await this.repository.markSnapshotFailed(session.companyOdooId, snapshotId, errorMessage(error));
       throw error;
     } finally {
+      clearInterval(lockRenewal);
       if ((await this.redis.get(lockKey)) === this.workerId) {
         await this.redis.del(lockKey);
       }
     }
+  }
+
+  private startLockRenewal(lockKey: string): NodeJS.Timeout {
+    const renewal = setInterval(() => {
+      void this.redis
+        .eval(
+          "if redis.call('get', KEYS[1]) == ARGV[1] then return redis.call('pexpire', KEYS[1], ARGV[2]) else return 0 end",
+          1,
+          lockKey,
+          this.workerId,
+          String(this.lockTtlMs)
+        )
+        .catch((error) => {
+          this.logger.warn(
+            { lock_key: lockKey, error: errorMessage(error) },
+            "Failed to renew member sync lock."
+          );
+        });
+    }, Math.max(Math.floor(this.lockTtlMs / 3), 5_000));
+    renewal.unref?.();
+    return renewal;
   }
 
   private async getSession(): Promise<OdooSyncSession> {
@@ -260,7 +283,7 @@ async function postOdoo(
   accessToken?: string
 ): Promise<Record<string, unknown>> {
   const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), config.requestTimeoutMs);
+  const timeout = setTimeout(() => controller.abort(), config.odooRequestTimeoutMs);
   try {
     const response = await fetch(`${config.odooBaseUrl}${path}`, {
       method: "POST",

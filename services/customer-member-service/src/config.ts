@@ -6,6 +6,7 @@ const envSchema = z.object({
   MEMBER_SERVICE_HOST: z.string().default("0.0.0.0"),
   MEMBER_SERVICE_PORT: z.coerce.number().int().min(1).max(65535).default(3001),
   REQUEST_TIMEOUT_SECONDS: z.coerce.number().positive().default(10),
+  ODOO_REQUEST_TIMEOUT_SECONDS: z.coerce.number().positive().default(120),
   AUTH_SERVICE_URL: z.string().trim().url(),
   ODOO_BASE_URL: z.string().trim().url(),
   INTERNAL_SERVICE_KEY: z.string().min(1),
@@ -31,6 +32,7 @@ export type AppConfig = {
   host: string;
   port: number;
   requestTimeoutMs: number;
+  odooRequestTimeoutMs: number;
   authServiceUrl: string;
   odooBaseUrl: string;
   internalServiceKey: string;
@@ -59,6 +61,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
     host: parsed.MEMBER_SERVICE_HOST,
     port: parsed.MEMBER_SERVICE_PORT,
     requestTimeoutMs: parsed.REQUEST_TIMEOUT_SECONDS * 1000,
+    odooRequestTimeoutMs: parsed.ODOO_REQUEST_TIMEOUT_SECONDS * 1000,
     authServiceUrl: trimTrailingSlash(parsed.AUTH_SERVICE_URL),
     odooBaseUrl: trimTrailingSlash(parsed.ODOO_BASE_URL),
     internalServiceKey: parsed.INTERNAL_SERVICE_KEY,
