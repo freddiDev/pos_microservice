@@ -254,6 +254,22 @@ export class CatalogSyncWorker {
         };
       }
 
+      let eagerImages = { synced: 0, failed: 0 };
+      if (this.config.catalogImageSyncEnabled && this.config.catalogImageEagerCount > 0) {
+        const eagerProducts = await this.repository.listSnapshotProductsForImages(
+          posConfigId,
+          snapshotId,
+          0,
+          this.config.catalogImageEagerCount
+        );
+        eagerImages = await this.syncImagesForProducts(
+          accessToken,
+          eagerProducts,
+          snapshotId,
+          posConfigId
+        );
+      }
+
       const state = await this.repository.commitSnapshot(
         posConfigId,
         snapshotId,
@@ -272,8 +288,8 @@ export class CatalogSyncWorker {
 
       return {
         synced_count: syncedCount,
-        images_synced: 0,
-        images_failed: 0,
+        images_synced: eagerImages.synced,
+        images_failed: eagerImages.failed,
         snapshot_id: snapshotId,
         source_total: sourceTotal,
         service_total: state.product_count,
@@ -364,9 +380,14 @@ export class CatalogSyncWorker {
     posConfigId: number
   ): Promise<{ synced: number; failed: number }> {
     if (!products.length) return { synced: 0, failed: 0 };
+    const linked = await this.repository.linkExistingImagesToSnapshot(
+      products,
+      snapshotId,
+      posConfigId
+    );
     const needingSync = await this.repository.imagesNeedingSync(products);
     if (!needingSync.length) {
-      return { synced: 0, failed: 0 };
+      return { synced: linked, failed: 0 };
     }
 
     const results = await mapWithConcurrency(
@@ -380,7 +401,7 @@ export class CatalogSyncWorker {
     }
 
     const failed = results.filter((item) => item.error !== null).length;
-    return { synced: images.length, failed };
+    return { synced: linked + images.length, failed };
   }
 
   private async fetchProductImage(

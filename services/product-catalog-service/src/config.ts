@@ -17,6 +17,7 @@ const envSchema = z.object({
   CATALOG_IMAGE_SYNC_ENABLED: booleanEnv(true),
   CATALOG_IMAGE_FIELD: z.string().trim().min(1).default("image_128"),
   CATALOG_IMAGE_SYNC_CONCURRENCY: z.coerce.number().int().min(1).max(16).default(4),
+  CATALOG_IMAGE_EAGER_COUNT: z.coerce.number().int().min(0).max(500).default(60),
   CATALOG_IMAGE_MAX_BYTES: z.coerce.number().int().min(1024).default(262144),
   SYNC_WORKER_ENABLED: booleanEnv(false),
   SYNC_WORKER_INTERVAL_SECONDS: z.coerce.number().positive().default(60),
@@ -47,6 +48,7 @@ export type AppConfig = {
   catalogImageSyncEnabled: boolean;
   catalogImageField: string;
   catalogImageSyncConcurrency: number;
+  catalogImageEagerCount: number;
   catalogImageMaxBytes: number;
   syncWorkerEnabled: boolean;
   syncWorkerIntervalMs: number;
@@ -79,6 +81,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
     catalogImageSyncEnabled: parsed.CATALOG_IMAGE_SYNC_ENABLED,
     catalogImageField: parsed.CATALOG_IMAGE_FIELD,
     catalogImageSyncConcurrency: parsed.CATALOG_IMAGE_SYNC_CONCURRENCY,
+    catalogImageEagerCount: parsed.CATALOG_IMAGE_EAGER_COUNT,
     catalogImageMaxBytes: parsed.CATALOG_IMAGE_MAX_BYTES,
     syncWorkerEnabled: parsed.SYNC_WORKER_ENABLED,
     syncWorkerIntervalMs: parsed.SYNC_WORKER_INTERVAL_SECONDS * 1000,

@@ -271,7 +271,9 @@ export class ProductCatalogRepository {
         },
         { projection: { _id: 0, raw: 0 } }
       )
-      .sort({ odoo_product_id: 1 })
+      // Match the product API ordering so the eager image batch corresponds
+      // to the first cards rendered by the mobile POS.
+      .sort({ write_date: 1, odoo_product_id: 1 })
       .skip(offset)
       .limit(limit)
       .toArray();
@@ -330,8 +332,75 @@ export class ProductCatalogRepository {
     return candidates.filter((product) => {
       const image = existingByKey.get(productImageKey(product));
       if (!image) return true;
-      return image.source_url !== product.image_url || image.source_write_date !== product.write_date;
+      // Odoo can expose the source image through image_512/image_128 while
+      // the worker stores the normalized image_128 URL. The product write
+      // date is the stable change token, so comparing raw URLs would cause
+      // every worker cycle to download all images again.
+      return image.source_write_date !== product.write_date;
     });
+  }
+
+  async linkExistingImagesToSnapshot(
+    products: ProductDocument[],
+    snapshotId: string,
+    posConfigId: number
+  ): Promise<number> {
+    const candidates = products.filter((product) => Boolean(product.image_url));
+    if (!candidates.length) return 0;
+
+    const existing = await this.collections.productImages
+      .find(
+        {
+          $or: candidates.map((product) => ({
+            odoo_product_id: product.odoo_product_id,
+            warehouse_odoo_id: product.warehouse_odoo_id
+          }))
+        },
+        {
+          projection: {
+            _id: 0,
+            odoo_product_id: 1,
+            warehouse_odoo_id: 1,
+            source_write_date: 1,
+            checksum: 1,
+            content_type: 1,
+            synced_at: 1
+          }
+        }
+      )
+      .toArray();
+    const existingByKey = new Map(existing.map((image) => [productImageKey(image), image]));
+    const links = candidates.flatMap((product) => {
+      const image = existingByKey.get(productImageKey(product));
+      if (!image || image.source_write_date !== product.write_date || !image.checksum) {
+        return [];
+      }
+      return [{ product, image }];
+    });
+    if (!links.length) return 0;
+
+    await this.collections.productSnapshots.bulkWrite(
+      links.map(({ product, image }) => ({
+        updateOne: {
+          filter: {
+            snapshot_id: snapshotId,
+            pos_config_odoo_id: posConfigId,
+            odoo_product_id: product.odoo_product_id,
+            warehouse_odoo_id: product.warehouse_odoo_id
+          },
+          update: {
+            $set: {
+              has_image: true,
+              image_hash: image.checksum,
+              image_content_type: image.content_type,
+              image_synced_at: image.synced_at
+            }
+          }
+        }
+      })),
+      { ordered: false }
+    );
+    return links.length;
   }
 
   async upsertProductImages(images: ProductImageDocument[], snapshotId?: string, posConfigId?: number): Promise<void> {
