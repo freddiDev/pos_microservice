@@ -116,17 +116,12 @@ export async function fetchOdooProductImage(
 
 function productImageUrl(config: AppConfig, productId: number, sourceUrl?: string | null): string {
   const base = new URL(config.odooBaseUrl);
-  if (!sourceUrl) {
-    return new URL(`/web/image/product.product/${productId}/${config.catalogImageField}`, base).toString();
-  }
-
-  try {
-    const parsed = new URL(sourceUrl, base);
-    const pathname = parsed.pathname.replace(/\/image(?:_\d+)?$/, `/${config.catalogImageField}`);
-    return new URL(`${pathname}${parsed.search}`, base).toString();
-  } catch {
-    return new URL(`/web/image/product.product/${productId}/${config.catalogImageField}`, base).toString();
-  }
+  // Always use the authenticated addon endpoint. Existing Mongo documents
+  // may still contain the legacy /web/image URL, and that route is session
+  // based: with the worker Bearer token it can return a redirect or HTML.
+  // Rebuilding the URL here makes old snapshots self-healing on the next
+  // image pass without requiring a full product snapshot rewrite first.
+  return new URL(`/api/microservice/catalog/products/${productId}/image`, base).toString();
 }
 
 function unwrapJsonRpc(body: unknown): Record<string, unknown> | undefined {

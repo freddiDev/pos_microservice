@@ -1,5 +1,5 @@
 import type { Redis } from "ioredis";
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 
 import type { AppConfig } from "./config.js";
 import { ProductDocument, ProductImageDocument } from "./catalog/normalizers.js";
@@ -202,6 +202,8 @@ export class CatalogSyncWorker {
       let syncedCount = 0;
       let sourceTotal = 0;
       let latestWriteDate: string | null = null;
+      let latestImageWriteDate: string | null = null;
+      const sourceFingerprint = createHash("sha256");
       let firstSnapshot: Record<string, unknown> | null = null;
       let hasMore = true;
 
@@ -214,12 +216,14 @@ export class CatalogSyncWorker {
         firstSnapshot ??= snapshot;
 
         const page = pageInfo(snapshot.products);
+        updateSourceFingerprint(sourceFingerprint, page.items);
         if (sourceTotal === 0) sourceTotal = page.total;
         if (page.total !== sourceTotal) {
           throw new Error(`Product source total changed during sync: ${sourceTotal} -> ${page.total}.`);
         }
         const written = await this.repository.writeSnapshotPage(posConfigId, snapshotId, snapshot);
         latestWriteDate = maxWriteDate(latestWriteDate, written.latestWriteDate);
+        latestImageWriteDate = maxWriteDate(latestImageWriteDate, written.latestImageWriteDate);
         syncedCount += page.items.length;
         if (syncedCount < sourceTotal && page.items.length === 0) {
           throw new Error("Odoo returned an empty product page before source_total was reached.");
@@ -230,12 +234,12 @@ export class CatalogSyncWorker {
 
       const previousTotal = previousState?.source_total ?? previousState?.product_count;
       const previousSnapshotId = previousState?.active_snapshot_id;
+      const sourceFingerprintValue = sourceFingerprint.digest("hex");
       const unchanged = Boolean(
         previousSnapshotId &&
           previousTotal === sourceTotal &&
-          previousState.last_odoo_write_date &&
-          latestWriteDate &&
-          previousState.last_odoo_write_date === latestWriteDate
+          previousState.source_fingerprint &&
+          previousState.source_fingerprint === sourceFingerprintValue
       );
       if (unchanged && previousSnapshotId) {
         await this.repository.discardUnchangedSnapshot(posConfigId, snapshotId);
@@ -260,7 +264,11 @@ export class CatalogSyncWorker {
         snapshotId,
         firstSnapshot ?? {},
         sourceTotal,
-        latestWriteDate
+        latestWriteDate,
+        undefined,
+        this.config.catalogImageSyncEnabled,
+        latestImageWriteDate,
+        sourceFingerprintValue
       );
       void this.repository.pruneSnapshots(posConfigId, snapshotId);
 
@@ -334,10 +342,27 @@ export class CatalogSyncWorker {
           { pos_config_id: posConfigId, snapshot_id: snapshotId, ...result },
           "Catalog image sync completed."
         );
+        this.setStatus({
+          image_sync: {
+            pos_config_id: posConfigId,
+            snapshot_id: snapshotId,
+            ...result
+          }
+        });
       })
       .catch((error) => {
+        const message = errorMessage(error);
+        void this.repository.markImageSyncFailed(posConfigId, snapshotId, message);
+        this.setStatus({
+          image_sync: {
+            pos_config_id: posConfigId,
+            snapshot_id: snapshotId,
+            status: "failed",
+            error: message
+          }
+        });
         this.logger.error(
-          { pos_config_id: posConfigId, snapshot_id: snapshotId, error: errorMessage(error) },
+          { pos_config_id: posConfigId, snapshot_id: snapshotId, error: message },
           "Catalog image sync failed; product snapshot remains usable."
         );
       });
@@ -353,10 +378,14 @@ export class CatalogSyncWorker {
     accessToken: string,
     snapshotId: string,
     posConfigId: number
-  ): Promise<{ synced: number; failed: number }> {
+  ): Promise<{ synced: number; failed: number; removed: number; total: number; error?: string | null }> {
+    const total = await this.repository.countSnapshotProductsForImages(posConfigId, snapshotId);
+    await this.repository.markImageSyncStarted(posConfigId, snapshotId, total);
     let offset = 0;
     let synced = 0;
     let failed = 0;
+    let removed = 0;
+    let lastError: string | null = null;
     const batchSize = Math.max(this.config.catalogMaxLimit, 1000);
     let firstBatch = true;
 
@@ -380,11 +409,15 @@ export class CatalogSyncWorker {
       );
       synced += result.synced;
       failed += result.failed;
+      removed += result.removed;
+      lastError = result.error || lastError;
       offset += products.length;
       firstBatch = false;
     }
 
-    return { synced, failed };
+    const result = { synced, failed, removed, total, error: lastError };
+    await this.repository.markImageSyncCompleted(posConfigId, snapshotId, result);
+    return result;
   }
 
   private async syncImagesForProducts(
@@ -392,8 +425,8 @@ export class CatalogSyncWorker {
     products: ProductDocument[],
     snapshotId: string,
     posConfigId: number
-  ): Promise<{ synced: number; failed: number }> {
-    if (!products.length) return { synced: 0, failed: 0 };
+  ): Promise<{ synced: number; failed: number; removed: number; error?: string | null }> {
+    if (!products.length) return { synced: 0, failed: 0, removed: 0, error: null };
     const linked = await this.repository.linkExistingImagesToSnapshot(
       products,
       snapshotId,
@@ -401,7 +434,7 @@ export class CatalogSyncWorker {
     );
     const needingSync = await this.repository.imagesNeedingSync(products);
     if (!needingSync.length) {
-      return { synced: linked, failed: 0 };
+      return { synced: linked, failed: 0, removed: 0, error: null };
     }
 
     const results = await mapWithConcurrency(
@@ -415,19 +448,29 @@ export class CatalogSyncWorker {
     }
 
     const failed = results.filter((item) => item.error !== null).length;
-    return { synced: linked + images.length, failed };
+    const removedProducts = results
+      .filter((item) => item.error === null && item.image === null)
+      .map((item) => item.product);
+    const removed = await this.repository.removeProductImages(
+      removedProducts,
+      snapshotId,
+      posConfigId
+    );
+    const error = results.find((item) => item.error !== null)?.error || null;
+    return { synced: linked + images.length + removed, failed, removed, error };
   }
 
   private async fetchProductImage(
     accessToken: string,
     product: ProductDocument
-  ): Promise<{ image: ProductImageDocument | null; error: string | null }> {
+  ): Promise<{ product: ProductDocument; image: ProductImageDocument | null; error: string | null }> {
     try {
       const image = await fetchOdooProductImage(this.config, accessToken, product.odoo_product_id, product.image_url);
       if (!image) {
-        return { image: null, error: null };
+        return { product, image: null, error: null };
       }
       return {
+        product,
         image: {
           odoo_product_id: product.odoo_product_id,
           warehouse_odoo_id: product.warehouse_odoo_id,
@@ -436,8 +479,9 @@ export class CatalogSyncWorker {
           checksum: image.checksum,
           size: image.size,
           source_url: image.sourceUrl,
-          source_write_date: product.write_date,
-          synced_at: new Date()
+          source_write_date: product.image_write_date || product.write_date,
+          synced_at: new Date(),
+          missing: false
         },
         error: null
       };
@@ -450,7 +494,7 @@ export class CatalogSyncWorker {
         },
         "Failed to sync product image."
       );
-      return { image: null, error: errorMessage(error) };
+      return { product, image: null, error: errorMessage(error) };
     }
   }
 
@@ -580,6 +624,25 @@ function maxWriteDate(current: string | null, candidate: string | null): string 
   if (!current) return candidate;
   if (!candidate) return current;
   return candidate > current ? candidate : current;
+}
+
+function updateSourceFingerprint(
+  hash: ReturnType<typeof createHash>,
+  items: Record<string, unknown>[]
+): void {
+  // The Odoo endpoint orders by write_date and id. Sorting each page again
+  // keeps equal-timestamp records deterministic on older Odoo builds.
+  const ordered = [...items].sort((left, right) => {
+    const leftId = Number(left.id) || 0;
+    const rightId = Number(right.id) || 0;
+    return leftId - rightId;
+  });
+  for (const item of ordered) {
+    hash.update(
+      `${String(item.id ?? "")}|${String(item.write_date ?? "")}|` +
+        `${String(item.image_write_date ?? item.write_date ?? "")}\n`
+    );
+  }
 }
 
 async function mapWithConcurrency<T, R>(items: T[], concurrency: number, mapper: (item: T) => Promise<R>): Promise<R[]> {

@@ -46,7 +46,11 @@ export class ProductCatalogRepository {
     posConfigId: number,
     snapshotId: string,
     snapshot: Record<string, unknown>
-  ): Promise<{ products: number; latestWriteDate: string | null }> {
+  ): Promise<{
+    products: number;
+    latestWriteDate: string | null;
+    latestImageWriteDate: string | null;
+  }> {
     const products = extractItems(snapshot.products).map((item) => ({
       ...normalizeProduct(item),
       snapshot_id: snapshotId,
@@ -81,7 +85,8 @@ export class ProductCatalogRepository {
 
     return {
       products: products.length,
-      latestWriteDate: latestWriteDate(products)
+      latestWriteDate: latestWriteDate(products),
+      latestImageWriteDate: latestImageWriteDate(products)
     };
   }
 
@@ -91,7 +96,10 @@ export class ProductCatalogRepository {
     firstSnapshot: Record<string, unknown>,
     sourceTotal: number,
     latestWriteDate: string | null,
-    completedAt = new Date()
+    completedAt = new Date(),
+    imageSyncEnabled = true,
+    latestImageWriteDate: string | null = null,
+    sourceFingerprint: string | null = null
   ): Promise<SyncStateDocument> {
     const stagedProducts = await this.collections.productSnapshots.countDocuments({
       snapshot_id: snapshotId,
@@ -112,13 +120,25 @@ export class ProductCatalogRepository {
       product_count: stagedProducts,
       last_synced_at: completedAt,
       last_odoo_write_date: latestWriteDate || previous?.last_odoo_write_date || null,
+      last_odoo_image_write_date:
+        latestImageWriteDate || previous?.last_odoo_image_write_date || null,
+      source_fingerprint: sourceFingerprint || previous?.source_fingerprint || null,
       active_snapshot_id: snapshotId,
       sync_status: "complete",
       source_total: sourceTotal,
       last_run_id: snapshotId,
       last_run_started_at: previous?.last_run_started_at || null,
       last_run_completed_at: completedAt,
-      last_error: null
+      last_error: null,
+      image_sync_status: imageSyncEnabled ? "pending" : "disabled",
+      image_sync_snapshot_id: imageSyncEnabled ? snapshotId : null,
+      image_sync_revision: previous?.image_sync_revision || null,
+      image_sync_started_at: null,
+      image_sync_completed_at: imageSyncEnabled ? previous?.image_sync_completed_at || null : completedAt,
+      image_sync_total: imageSyncEnabled ? 0 : 0,
+      image_synced_count: 0,
+      image_failed_count: 0,
+      image_sync_error: null
     };
     await this.collections.syncState.updateOne(
       { pos_config_odoo_id: posConfigId },
@@ -197,6 +217,8 @@ export class ProductCatalogRepository {
       this.collections.products.countDocuments({ warehouse_odoo_id: warehouseId })
     ]);
     const latest = latestWriteDate(products) || existingState?.last_odoo_write_date || null;
+    const latestImage =
+      latestImageWriteDate(products) || existingState?.last_odoo_image_write_date || null;
 
     const state: SyncStateDocument = {
       pos_config_odoo_id: posConfigId,
@@ -204,7 +226,8 @@ export class ProductCatalogRepository {
       warehouse_name: warehouseName,
       product_count: productCount,
       last_synced_at: new Date(),
-      last_odoo_write_date: latest
+      last_odoo_write_date: latest,
+      last_odoo_image_write_date: latestImage
     };
 
     await this.collections.syncState.updateOne(
@@ -283,6 +306,79 @@ export class ProductCatalogRepository {
       .toArray();
   }
 
+  async countSnapshotProductsForImages(posConfigId: number, snapshotId: string): Promise<number> {
+    return this.collections.productSnapshots.countDocuments({
+      pos_config_odoo_id: posConfigId,
+      snapshot_id: snapshotId,
+      image_url: { $exists: true, $nin: [null, ""] }
+    });
+  }
+
+  async markImageSyncStarted(
+    posConfigId: number,
+    snapshotId: string,
+    total: number,
+    startedAt = new Date()
+  ): Promise<void> {
+    await this.collections.syncState.updateOne(
+      { pos_config_odoo_id: posConfigId, active_snapshot_id: snapshotId },
+      {
+        $set: {
+          image_sync_status: "running",
+          image_sync_snapshot_id: snapshotId,
+          image_sync_started_at: startedAt,
+          image_sync_completed_at: null,
+          image_sync_total: total,
+          image_synced_count: 0,
+          image_failed_count: 0,
+          image_sync_error: null
+        }
+      }
+    );
+  }
+
+  async markImageSyncCompleted(
+    posConfigId: number,
+    snapshotId: string,
+    result: { synced: number; failed: number; total: number; error?: string | null },
+    completedAt = new Date()
+  ): Promise<void> {
+    const changed = result.synced > 0;
+    const set: Record<string, unknown> = {
+      image_sync_status: result.failed > 0 ? "failed" : "complete",
+      image_sync_snapshot_id: snapshotId,
+      image_sync_completed_at: completedAt,
+      image_sync_total: result.total,
+      image_synced_count: result.synced,
+      image_failed_count: result.failed,
+      image_sync_error: result.error || null
+    };
+    if (changed) set.image_sync_revision = completedAt.toISOString();
+    await this.collections.syncState.updateOne(
+      { pos_config_odoo_id: posConfigId, active_snapshot_id: snapshotId },
+      { $set: set }
+    );
+  }
+
+  async markImageSyncFailed(
+    posConfigId: number,
+    snapshotId: string,
+    error: string,
+    failedAt = new Date()
+  ): Promise<void> {
+    await this.collections.syncState.updateOne(
+      { pos_config_odoo_id: posConfigId, active_snapshot_id: snapshotId },
+      {
+        $set: {
+          image_sync_status: "failed",
+          image_sync_snapshot_id: snapshotId,
+          image_sync_completed_at: failedAt,
+          image_sync_error: error
+        }
+      }
+    );
+  }
+
   async findByBarcode(posConfigId: number, warehouseId: number, barcode: string): Promise<Record<string, unknown> | null> {
     const state = await this.syncState(posConfigId);
     if (state?.sync_status === "running" && !state.active_snapshot_id) return null;
@@ -340,7 +436,7 @@ export class ProductCatalogRepository {
       // the worker stores the normalized image_128 URL. The product write
       // date is the stable change token, so comparing raw URLs would cause
       // every worker cycle to download all images again.
-      return image.source_write_date !== product.write_date;
+      return image.source_write_date !== productImageWriteDate(product);
     });
   }
 
@@ -376,7 +472,7 @@ export class ProductCatalogRepository {
     const existingByKey = new Map(existing.map((image) => [productImageKey(image), image]));
     const links = candidates.flatMap((product) => {
       const image = existingByKey.get(productImageKey(product));
-      if (!image || image.source_write_date !== product.write_date || !image.checksum) {
+      if (!image || image.source_write_date !== productImageWriteDate(product) || !image.checksum) {
         return [];
       }
       return [{ product, image }];
@@ -465,6 +561,92 @@ export class ProductCatalogRepository {
         { ordered: false }
       )
     ]);
+  }
+
+  async removeProductImages(
+    products: ProductDocument[],
+    snapshotId?: string,
+    posConfigId?: number
+  ): Promise<number> {
+    if (!products.length) return 0;
+    const keys = products.map((product) => ({
+      odoo_product_id: product.odoo_product_id,
+      warehouse_odoo_id: product.warehouse_odoo_id
+    }));
+    const existing = await this.collections.productImages
+      .find({ $or: keys }, { projection: { _id: 1 } })
+      .toArray();
+    const syncedAt = new Date();
+    await Promise.all([
+      this.collections.productImages.bulkWrite(
+        products.map((product) => ({
+          updateOne: {
+            filter: {
+              odoo_product_id: product.odoo_product_id,
+              warehouse_odoo_id: product.warehouse_odoo_id
+            },
+            update: {
+              $set: {
+                odoo_product_id: product.odoo_product_id,
+                warehouse_odoo_id: product.warehouse_odoo_id,
+                content_type: "application/octet-stream",
+                data: Buffer.alloc(0),
+                checksum: "",
+                size: 0,
+                source_url: product.image_url || "",
+                source_write_date: productImageWriteDate(product),
+                synced_at: syncedAt,
+                missing: true
+              }
+            },
+            upsert: true
+          }
+        })),
+        { ordered: false }
+      ),
+      snapshotId && posConfigId
+        ? this.collections.productSnapshots.bulkWrite(
+            products.map((product) => ({
+              updateOne: {
+                filter: {
+                  snapshot_id: snapshotId,
+                  pos_config_odoo_id: posConfigId,
+                  odoo_product_id: product.odoo_product_id,
+                  warehouse_odoo_id: product.warehouse_odoo_id
+                },
+                update: {
+                  $set: {
+                    has_image: false,
+                    image_hash: null,
+                    image_content_type: null,
+                    image_synced_at: null
+                  }
+                }
+              }
+            })),
+            { ordered: false }
+          )
+        : this.collections.products.bulkWrite(
+            products.map((product) => ({
+              updateOne: {
+                filter: {
+                  odoo_product_id: product.odoo_product_id,
+                  warehouse_odoo_id: product.warehouse_odoo_id
+                },
+                update: {
+                  $set: {
+                    has_image: false,
+                    image_hash: null,
+                    image_content_type: null,
+                    image_synced_at: null
+                  }
+                }
+              }
+            })),
+            { ordered: false }
+          )
+    ]);
+    return existing.length;
   }
 
   async findImage(warehouseId: number, productId: number): Promise<ProductImageDocument | null> {
@@ -592,4 +774,16 @@ function latestWriteDate(products: ProductDocument[]): string | null {
     .filter((value): value is string => Boolean(value))
     .sort()
     .at(-1) || null;
+}
+
+function latestImageWriteDate(products: ProductDocument[]): string | null {
+  return products
+    .map((product) => product.image_write_date || product.write_date)
+    .filter((value): value is string => Boolean(value))
+    .sort()
+    .at(-1) || null;
+}
+
+function productImageWriteDate(product: ProductDocument): string | null {
+  return product.image_write_date || product.write_date;
 }

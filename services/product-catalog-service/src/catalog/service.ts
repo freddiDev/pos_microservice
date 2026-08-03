@@ -98,7 +98,14 @@ export class ProductCatalogService {
       products: {
         ...page,
         snapshot_id: snapshotId,
-        sync_status: syncStatus
+        sync_status: syncStatus,
+        image_sync_status: state.image_sync_status || "disabled",
+        image_sync_snapshot_id: state.image_sync_snapshot_id || null,
+        image_sync_revision: state.image_sync_revision || null,
+        image_sync_total: state.image_sync_total || 0,
+        image_synced_count: state.image_synced_count || 0,
+        image_failed_count: state.image_failed_count || 0,
+        image_sync_error: state.image_sync_error || null
       },
       config: {
         pos_config_id: posConfigId,

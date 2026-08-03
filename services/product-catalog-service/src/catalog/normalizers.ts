@@ -13,6 +13,7 @@ export type ProductDocument = {
   taxes_id: unknown[];
   categ_id: number | null;
   write_date: string | null;
+  image_write_date?: string | null;
   image_url: string | null;
   has_image?: boolean;
   image_hash?: string | null;
@@ -36,6 +37,7 @@ export type ProductImageDocument = {
   source_url: string;
   source_write_date: string | null;
   synced_at: Date;
+  missing?: boolean;
 };
 
 export type SyncStateDocument = {
@@ -45,6 +47,8 @@ export type SyncStateDocument = {
   product_count: number;
   last_synced_at: Date;
   last_odoo_write_date: string | null;
+  last_odoo_image_write_date?: string | null;
+  source_fingerprint?: string | null;
   active_snapshot_id?: string | null;
   sync_status?: "running" | "complete" | "failed";
   source_total?: number;
@@ -52,6 +56,15 @@ export type SyncStateDocument = {
   last_run_started_at?: Date | null;
   last_run_completed_at?: Date | null;
   last_error?: string | null;
+  image_sync_status?: "disabled" | "pending" | "running" | "complete" | "failed";
+  image_sync_snapshot_id?: string | null;
+  image_sync_revision?: string | null;
+  image_sync_started_at?: Date | null;
+  image_sync_completed_at?: Date | null;
+  image_sync_total?: number;
+  image_synced_count?: number;
+  image_failed_count?: number;
+  image_sync_error?: string | null;
 };
 
 export function normalizeProduct(input: Record<string, unknown>): ProductDocument {
@@ -76,6 +89,7 @@ export function normalizeProduct(input: Record<string, unknown>): ProductDocumen
     taxes_id: Array.isArray(input.taxes_id) ? input.taxes_id : [],
     categ_id: toNumber(input.categ_id),
     write_date: toStringOrNull(input.write_date),
+    image_write_date: toStringOrNull(input.image_write_date) || toStringOrNull(input.write_date),
     image_url: toStringOrNull(input.image_url),
     raw: input
   };
