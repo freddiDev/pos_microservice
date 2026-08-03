@@ -91,6 +91,7 @@ export class ProductCatalogService {
       warehouseId: state.warehouse_odoo_id,
       offset: request.offset,
       limit,
+      cursor: request.cursor,
       snapshotId: snapshotId || undefined,
       updatedAfter: request.updated_after || request.last_update
     });

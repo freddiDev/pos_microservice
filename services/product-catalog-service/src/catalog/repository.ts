@@ -15,6 +15,7 @@ export type ProductListOptions = {
   warehouseId: number;
   offset: number;
   limit: number;
+  cursor?: string;
   snapshotId?: string;
   updatedAfter?: string;
 };
@@ -257,6 +258,17 @@ export class ProductCatalogRepository {
       filter.write_date = { $gt: options.updatedAfter };
     }
 
+    if (options.cursor) {
+      const decoded = decodeProductCursor(options.cursor);
+      filter.$or = [
+        { write_date: { $gt: decoded.writeDate } },
+        {
+          write_date: decoded.writeDate,
+          odoo_product_id: { $gt: decoded.productId }
+        }
+      ];
+    }
+
     // The mobile client pins every page to the active snapshot after the
     // first response. Reusing the validated sync-state count avoids a full
     // Mongo count scan for every page of a large catalog.
@@ -265,21 +277,28 @@ export class ProductCatalogRepository {
       ? Promise.resolve(state.product_count)
       : collection.countDocuments(filter);
     const [items, total] = await Promise.all([
-      collection
-        .find(filter, { projection: { _id: 0, raw: 0 } })
-        .sort({ write_date: 1, odoo_product_id: 1 })
-        .skip(options.offset)
-        .limit(options.limit)
-        .toArray(),
+      (() => {
+        const query = collection
+          .find(filter, { projection: { _id: 0, raw: 0 } })
+          .sort({ write_date: 1, odoo_product_id: 1 });
+        if (options.cursor) return query.limit(options.limit).toArray();
+        return query.skip(options.offset).limit(options.limit).toArray();
+      })(),
       totalPromise
     ]);
+
+    const hasMore = options.cursor
+      ? items.length === options.limit
+      : options.offset + items.length < total;
+    const last = items.at(-1);
 
     return {
       items: items.map((item) => productToApi(item, this.apiPrefix)),
       offset: options.offset,
       limit: options.limit,
       total,
-      has_more: options.offset + options.limit < total
+      has_more: hasMore,
+      next_cursor: hasMore && last ? encodeProductCursor(last) : null
     };
   }
 
@@ -700,6 +719,31 @@ export class ProductCatalogRepository {
   }
 }
 
+type ProductCursor = {
+  writeDate: string;
+  productId: number;
+};
+
+function encodeProductCursor(item: Pick<ProductDocument, "write_date" | "odoo_product_id">): string {
+  const payload: ProductCursor = {
+    writeDate: item.write_date || "",
+    productId: item.odoo_product_id
+  };
+  return Buffer.from(JSON.stringify(payload), "utf8").toString("base64url");
+}
+
+function decodeProductCursor(value: string): ProductCursor {
+  try {
+    const decoded = JSON.parse(Buffer.from(value, "base64url").toString("utf8")) as Record<string, unknown>;
+    const writeDate = typeof decoded.writeDate === "string" ? decoded.writeDate : "";
+    const productId = toNumber(decoded.productId);
+    if (!writeDate || !productId || productId < 1) throw new Error("invalid cursor");
+    return { writeDate, productId };
+  } catch {
+    throw new Error("Invalid product pagination cursor.");
+  }
+}
+
 function productImageKey(product: Pick<ProductDocument | ProductImageDocument, "odoo_product_id" | "warehouse_odoo_id">): string {
   return `${product.warehouse_odoo_id}:${product.odoo_product_id}`;
 }
@@ -765,7 +809,7 @@ function resolveWarehouseName(snapshot: Record<string, unknown>, products: Produ
 }
 
 function emptyProductPage(offset: number, limit: number): Record<string, unknown> {
-  return { items: [], offset, limit, total: 0, has_more: false };
+  return { items: [], offset, limit, total: 0, has_more: false, next_cursor: null };
 }
 
 function latestWriteDate(products: ProductDocument[]): string | null {

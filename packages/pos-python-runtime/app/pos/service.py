@@ -18,6 +18,7 @@ from app.pos.schemas import (
     OpenSessionRequest,
     OpeningCashRequest,
     PosCashierOut,
+    PosCashierPageOut,
     PosConfigListOut,
     PosConfigOut,
     PosPaymentMethodOut,
@@ -47,6 +48,44 @@ class PosService:
         if config and _config_allowed_for_principal(config, principal):
             return await self._cached_config_out(db, config)
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="POS config cache not found.")
+
+    async def list_cashiers(
+        self,
+        db: AsyncSession,
+        bearer_token: str,
+        odoo_config_id: int,
+        *,
+        offset: int = 0,
+        limit: int = 20,
+        query: str | None = None,
+    ) -> PosCashierPageOut:
+        principal = await self._auth_client.resolve(bearer_token)
+        config = await self._configs.get_by_odoo_id(db, odoo_config_id)
+        if not config or not _config_allowed_for_principal(config, principal):
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="POS config cache not found.")
+
+        raw_cashiers = (config.raw_odoo_payload or {}).get("cashiers") or []
+        cashiers = [item for item in raw_cashiers if isinstance(item, dict)]
+        normalized_query = (query or "").strip().casefold()
+        if normalized_query:
+            cashiers = [
+                item
+                for item in cashiers
+                if normalized_query in str(item.get("name") or "").casefold()
+                or normalized_query in str(item.get("login") or "").casefold()
+            ]
+
+        safe_offset = max(offset, 0)
+        safe_limit = min(max(limit, 1), 100)
+        page = cashiers[safe_offset : safe_offset + safe_limit]
+        return PosCashierPageOut(
+            items=[_cashier_out(item) for item in page],
+            offset=safe_offset,
+            limit=safe_limit,
+            total=len(cashiers),
+            has_more=safe_offset + len(page) < len(cashiers),
+            synced_at=config.synced_at,
+        )
 
     async def open_session(
         self,
@@ -336,11 +375,13 @@ def _cashier_out(item: dict[str, Any]) -> PosCashierOut:
     return PosCashierOut(
         id=user_id,
         odoo_user_id=user_id,
+        employee_odoo_id=_int_or_none(item.get("employee_odoo_id")),
         name=item.get("name") or f"Cashier {user_id}",
         login=_none_false(item.get("login")),
         avatar=_none_false(item.get("avatar")),
         has_pos_pin=bool(item.get("has_pos_pin")) or pin_hash is not None,
         pos_pin_hash=pin_hash,
+        source=_none_false(item.get("source")),
     )
 
 

@@ -1,6 +1,6 @@
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, Header, HTTPException, Request, status
+from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request, status
 from fastapi.security import HTTPAuthorizationCredentials
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -18,6 +18,7 @@ from app.pos.schemas import (
     OpeningCashRequest,
     PosConfigListOut,
     PosConfigOut,
+    PosCashierPageOut,
     PosSessionOut,
 )
 from app.pos.service import PosService
@@ -55,6 +56,26 @@ async def get_pos_config(
     service: Annotated[PosService, Depends(get_pos_service)],
 ) -> PosConfigOut:
     return await service.get_config(db, token, odoo_config_id)
+
+
+@router.get("/pos-configs/{odoo_config_id}/cashiers", response_model=PosCashierPageOut)
+async def list_pos_cashiers(
+    odoo_config_id: int,
+    db: Annotated[AsyncSession, Depends(get_db)],
+    token: Annotated[str, Depends(bearer_token)],
+    service: Annotated[PosService, Depends(get_pos_service)],
+    offset: int = Query(default=0, ge=0),
+    limit: int = Query(default=20, ge=1, le=100),
+    q: str | None = Query(default=None),
+) -> PosCashierPageOut:
+    return await service.list_cashiers(
+        db,
+        token,
+        odoo_config_id,
+        offset=offset,
+        limit=limit,
+        query=q,
+    )
 
 
 @router.get("/pos/sync/status")

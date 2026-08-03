@@ -30,11 +30,13 @@ class PosPaymentMethodOut(BaseModel):
 class PosCashierOut(BaseModel):
     id: int
     odoo_user_id: int
+    employee_odoo_id: int | None = None
     name: str
     login: str | None = None
     avatar: str | None = None
     has_pos_pin: bool = False
     pos_pin_hash: str | None = None
+    source: str | None = None
 
 
 class PosConfigOut(BaseModel):
@@ -70,6 +72,16 @@ class PosConfigOut(BaseModel):
 
 class PosConfigListOut(BaseModel):
     items: list[PosConfigOut]
+
+
+class PosCashierPageOut(BaseModel):
+    items: list[PosCashierOut] = Field(default_factory=list)
+    offset: int = 0
+    limit: int = 20
+    total: int = 0
+    has_more: bool = False
+    source: str = "odoo_sync_cache"
+    synced_at: datetime | None = None
 
 
 class PosSessionOut(BaseModel):
