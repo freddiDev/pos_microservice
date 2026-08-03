@@ -82,6 +82,10 @@ export function normalizeProduct(input: Record<string, unknown>): ProductDocumen
 }
 
 export function productToApi(document: ProductDocument, apiPrefix = "/api/v1"): Record<string, unknown> {
+  // Odoo metadata can arrive before the worker has stored the image bytes.
+  // The mobile client must only request an image that the service can serve.
+  const imageReady = Boolean(document.has_image && document.image_hash && document.image_synced_at);
+
   return {
     id: document.odoo_product_id,
     name: document.name,
@@ -91,9 +95,9 @@ export function productToApi(document: ProductDocument, apiPrefix = "/api/v1"): 
     taxes_id: document.taxes_id,
     categ_id: document.categ_id,
     write_date: document.write_date,
-    image_url: document.has_image ? `${apiPrefix}/catalog/products/${document.odoo_product_id}/image` : null,
-    has_image: document.has_image === true,
-    image_hash: document.image_hash || null,
+    image_url: imageReady ? `${apiPrefix}/catalog/products/${document.odoo_product_id}/image` : null,
+    has_image: imageReady,
+    image_hash: imageReady ? document.image_hash : null,
     product_tmpl_id: document.odoo_template_id,
     warehouse_id: document.warehouse_odoo_id,
     warehouse_name: document.warehouse_name,
